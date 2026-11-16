@@ -1,5 +1,5 @@
 [package]
-name = "rusty-fps-sketch"
+name = "marikinafps"
 version = "0.1.0"
 edition = "2021"
 description = "A tiny touch-friendly raycast FPS prototype in Rust"
@@ -16,6 +16,9 @@ min_sdk_version = 26
 target_sdk_version = 30
 build_targets = ["aarch64-linux-android"]
 fullscreen = true
+
+[package.metadata.android.activity_attributes]
+"android:screenOrientation" = "sensorLandscape"
 
 [profile.release]
 lto = false
