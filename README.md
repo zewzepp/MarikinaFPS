@@ -12,8 +12,10 @@ cargo run
 
 ## Controls
 
-- **Touch:** floating joystick on the left (touch anywhere on the left side), drag the right side to look. Buttons: FIRE (hold), JUMP, RELOAD, SCOPE (toggle), SNEAK (toggle), SLIDE.
-- **Desktop:** WASD move, hold right mouse and move to look, left mouse fire, Space jump, R reload, F scope, C or Ctrl sneak, Shift slide, Esc quit.
+- **Touch:** floating joystick on the left (touch anywhere on the left side), drag the right side to look. Buttons: Fire (hold), Jump, Rel (reload), Scope (toggle) and **Snk/Slide**.
+- **Snk/Slide:** walking shows **Snk** (tap to toggle sneak). Push the joystick all the way out to run and the button turns into **Slide**. Pick tap-to-slide or hold-to-slide in Settings.
+- **Settings** (octagon, top right): slide mode, and **Customize HUD** with a floating window (drag its title bar to move it). Tap a button on screen or use < > to select it, then change size, opacity or nudge it. Layout resets when the app restarts.
+- **Desktop:** WASD move, hold Shift to run, hold right mouse and move to look, left mouse fire, Space jump, R reload, F scope, C sneak/slide, Ctrl sneak, Esc quit. Click the Settings octagon for the menu.
 
 Crates are low enough to jump over or stand on. Targets respawn after a few seconds.
 
