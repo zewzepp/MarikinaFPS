@@ -1,155 +1,841 @@
 use macroquad::prelude::*;
 use std::collections::HashMap;
+use std::f32::consts::TAU;
 
-const MAP: [&str; 12] = [
-    "############",
-    "#..........#",
-    "#..##......#",
-    "#..........#",
-    "#......#...#",
-    "#..........#",
-    "#...#......#",
-    "#..........#",
-    "#......##..#",
-    "#..........#",
-    "#..........#",
-    "############",
+// '#' = wall, 'c' = low crate (jump over it or onto it), '.' = floor
+const MAP: [&str; 14] = [
+    "####################",
+    "#..................#",
+    "#..cc..........cc..#",
+    "#..................#",
+    "#.......####.......#",
+    "#.......#..........#",
+    "#..................#",
+    "#.c..............c.#",
+    "#..........##......#",
+    "#..................#",
+    "#..cc..............#",
+    "#..................#",
+    "#.............cc...#",
+    "####################",
 ];
-const FOV: f32 = 1.08;
-const MAX_DIST: f32 = 18.0;
 
-#[derive(Clone)]
-struct Target { x: f32, y: f32, alive: bool, phase: f32 }
+const WALL_H: f32 = 1.5;
+const CRATE_H: f32 = 0.5;
+const PLAYER_R: f32 = 0.2;
+const MAX_DIST: f32 = 40.0;
+const MAG: i32 = 12;
+const GRAVITY: f32 = 11.5;
+const JUMP_V: f32 = 4.6;
+
+fn cell(x: f32, z: f32) -> u8 {
+    if x < 0.0 || z < 0.0 {
+        return b'#';
+    }
+    MAP.get(z as usize)
+        .and_then(|row| row.as_bytes().get(x as usize))
+        .copied()
+        .unwrap_or(b'#')
+}
+
+fn height_at(x: f32, z: f32) -> f32 {
+    match cell(x, z) {
+        b'#' => WALL_H,
+        b'c' => CRATE_H,
+        _ => 0.0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tiny 3D helper: collects boxes/quads into a mesh so we make few draw calls.
+// ---------------------------------------------------------------------------
+struct Batch {
+    v: Vec<Vertex>,
+    i: Vec<u16>,
+}
+
+impl Batch {
+    fn new() -> Self {
+        Self { v: Vec::new(), i: Vec::new() }
+    }
+
+    fn flush(&mut self) {
+        if self.v.is_empty() {
+            return;
+        }
+        let mesh = Mesh {
+            vertices: std::mem::take(&mut self.v),
+            indices: std::mem::take(&mut self.i),
+            texture: None,
+        };
+        draw_mesh(&mesh);
+    }
+
+    fn quad(&mut self, p: [Vec3; 4], col: Color) {
+        let base = self.v.len() as u16;
+        for q in p {
+            self.v.push(Vertex::new(q.x, q.y, q.z, 0.0, 0.0, col));
+        }
+        self.i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        if self.v.len() > 1500 {
+            self.flush();
+        }
+    }
+
+    // Box from three half-extent axis vectors (so it can be rotated / tilted),
+    // with simple fake lighting per face.
+    fn boxed(&mut self, c: Vec3, ax: Vec3, ay: Vec3, az: Vec3, col: Color) {
+        let light = vec3(0.39, 0.87, 0.29);
+        let axes = [ax, ay, az];
+        for k in 0..3 {
+            let n = axes[k];
+            let u = axes[(k + 1) % 3];
+            let v = axes[(k + 2) % 3];
+            for s in [-1.0f32, 1.0] {
+                let fc = c + n * s;
+                let nn = (n * s).normalize_or_zero();
+                let shade = 0.55 + 0.45 * nn.dot(light).max(0.0);
+                let fcol = Color::new(col.r * shade, col.g * shade, col.b * shade, col.a);
+                self.quad([fc - u - v, fc + u - v, fc + u + v, fc - u + v], fcol);
+            }
+        }
+    }
+
+    fn aabb(&mut self, c: Vec3, half: Vec3, col: Color) {
+        self.boxed(c, vec3(half.x, 0.0, 0.0), vec3(0.0, half.y, 0.0), vec3(0.0, 0.0, half.z), col);
+    }
+
+    // Box rotated around the Y axis. hf = half size forward, hu = up, hr = right.
+    fn obox(&mut self, c: Vec3, yaw: f32, hf: f32, hu: f32, hr: f32, col: Color) {
+        let f = vec3(yaw.cos(), 0.0, yaw.sin());
+        let r = vec3(-yaw.sin(), 0.0, yaw.cos());
+        self.boxed(c, f * hf, vec3(0.0, hu, 0.0), r * hr, col);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Game state
+// ---------------------------------------------------------------------------
+struct Target {
+    x0: f32,
+    x: f32,
+    z: f32,
+    alive: bool,
+    phase: f32,
+    respawn: f32,
+}
+
+impl Target {
+    fn new(x: f32, z: f32, phase: f32) -> Self {
+        Self { x0: x, x, z, alive: true, phase, respawn: 0.0 }
+    }
+}
 
 struct Game {
-    x: f32, y: f32, angle: f32, pitch: f32,
-    health: i32, ammo: i32, reserve: i32, reloading: f32,
-    fire_cd: f32, jump: f32, jump_v: f32, slide: f32,
-    scoped: bool, sneaking: bool, kills: u32, targets: Vec<Target>,
-    touch_prev: HashMap<u64, Vec2>,
+    x: f32,
+    y: f32,
+    z: f32,
+    vy: f32,
+    grounded: bool,
+    yaw: f32,
+    pitch: f32, // positive = looking up
+    zoom: f32,  // 0 = normal, 1 = fully scoped
+    health: i32,
+    ammo: i32,
+    reserve: i32,
+    reloading: f32,
+    fire_cd: f32,
+    scoped: bool,
+    sneak_on: bool,
+    sneaking: bool,
+    slide: f32,
+    slide_dir: Vec2,
+    walk: f32,
+    moving: f32,
+    kills: u32,
+    targets: Vec<Target>,
+    tracer: Option<(Vec3, Vec3)>,
+    tracer_t: f32,
+    hit_t: f32,
 }
 
 impl Game {
     fn new() -> Self {
-        Self { x: 2.2, y: 2.2, angle: 0.35, pitch: 0.0, health: 100,
-            ammo: 12, reserve: 60, reloading: 0.0, fire_cd: 0.0, jump: 0.0,
-            jump_v: 0.0, slide: 0.0, scoped: false, sneaking: false, kills: 0,
-            targets: vec![Target{x:7.3,y:2.1,alive:true,phase:0.0},Target{x:9.2,y:5.2,alive:true,phase:1.8},Target{x:3.8,y:8.7,alive:true,phase:3.2}],
-            touch_prev: HashMap::new() }
+        Self {
+            x: 2.5,
+            y: 0.0,
+            z: 11.5,
+            vy: 0.0,
+            grounded: true,
+            yaw: -0.5,
+            pitch: 0.0,
+            zoom: 0.0,
+            health: 100,
+            ammo: MAG,
+            reserve: 60,
+            reloading: 0.0,
+            fire_cd: 0.0,
+            scoped: false,
+            sneak_on: false,
+            sneaking: false,
+            slide: 0.0,
+            slide_dir: Vec2::ZERO,
+            walk: 0.0,
+            moving: 0.0,
+            kills: 0,
+            targets: vec![
+                Target::new(9.5, 2.5, 0.0),
+                Target::new(15.5, 6.5, 1.8),
+                Target::new(6.5, 11.5, 3.2),
+                Target::new(13.5, 9.5, 4.4),
+                Target::new(17.5, 11.5, 5.6),
+            ],
+            tracer: None,
+            tracer_t: 0.0,
+            hit_t: 0.0,
+        }
     }
-    fn wall(x: f32, y: f32) -> bool {
-        let xi=x.floor() as isize; let yi=y.floor() as isize;
-        xi < 0 || yi < 0 || yi >= MAP.len() as isize || xi >= MAP[0].len() as isize || MAP[yi as usize].as_bytes()[xi as usize] == b'#'
+
+    fn blocked(&self, x: f32, z: f32) -> bool {
+        let r = PLAYER_R;
+        [(-r, -r), (r, -r), (-r, r), (r, r)]
+            .iter()
+            .any(|(ox, oz)| height_at(x + ox, z + oz) > self.y + 0.05)
     }
-    fn move_by(&mut self, dx: f32, dy: f32) {
-        if !Self::wall(self.x+dx, self.y) { self.x += dx; }
-        if !Self::wall(self.x, self.y+dy) { self.y += dy; }
+
+    fn move_by(&mut self, dx: f32, dz: f32) {
+        if !self.blocked(self.x + dx, self.z) {
+            self.x += dx;
+        }
+        if !self.blocked(self.x, self.z + dz) {
+            self.z += dz;
+        }
     }
+
+    // Height of the floor / crate top the player can stand on.
+    fn ground(&self, ref_y: f32) -> f32 {
+        let r = PLAYER_R;
+        let mut best = 0.0f32;
+        for (ox, oz) in [(-r, -r), (r, -r), (-r, r), (r, r)] {
+            let hh = height_at(self.x + ox, self.z + oz);
+            if hh <= ref_y + 0.05 && hh > best {
+                best = hh;
+            }
+        }
+        best
+    }
+
+    fn aim_dir(&self) -> Vec3 {
+        let cp = self.pitch.cos();
+        vec3(cp * self.yaw.cos(), self.pitch.sin(), cp * self.yaw.sin())
+    }
+
+    fn right(&self) -> Vec3 {
+        vec3(-self.yaw.sin(), 0.0, self.yaw.cos())
+    }
+
+    fn pivot(&self) -> Vec3 {
+        vec3(self.x, self.y + if self.slide > 0.0 { 0.40 } else if self.sneaking { 0.62 } else { 0.78 }, self.z)
+    }
+
+    // Over-the-shoulder camera that slides in when a wall is behind you.
+    fn cam_pos(&self) -> Vec3 {
+        let d = self.aim_dir();
+        let r = self.right();
+        let dist = 2.4 + (0.9 - 2.4) * self.zoom;
+        let shoulder = 0.35 + (0.28 - 0.35) * self.zoom;
+        let pivot = self.pivot();
+        let want = pivot - d * dist + r * shoulder + vec3(0.0, 0.15, 0.0);
+        let mut best = want;
+        let steps = 24;
+        for i in 1..=steps {
+            let f = i as f32 / steps as f32;
+            let p = pivot + (want - pivot) * f;
+            if height_at(p.x, p.z) > p.y {
+                let back = (i - 1) as f32 / steps as f32;
+                best = pivot + (want - pivot) * back;
+                break;
+            }
+        }
+        if best.y < 0.12 {
+            best.y = 0.12;
+        }
+        best
+    }
+
+    fn start_reload(&mut self) {
+        if self.reloading <= 0.0 && self.ammo < MAG && self.reserve > 0 {
+            self.reloading = 1.25;
+        }
+    }
+
     fn shoot(&mut self) {
-        if self.fire_cd > 0.0 || self.reloading > 0.0 { return; }
-        if self.ammo <= 0 { self.start_reload(); return; }
-        self.ammo -= 1; self.fire_cd = 0.20;
-        let mut best: Option<(usize,f32)> = None;
-        for (i,t) in self.targets.iter().enumerate().filter(|(_,t)|t.alive) {
-            let dx=t.x-self.x; let dy=t.y-self.y; let d=(dx*dx+dy*dy).sqrt();
-            let a=wrap_angle(dy.atan2(dx)-self.angle).abs();
-            if a < if self.scoped {0.045} else {0.12} && d < MAX_DIST && best.map_or(true,|(_,bd)|d<bd) { best=Some((i,d)); }
+        if self.fire_cd > 0.0 || self.reloading > 0.0 {
+            return;
         }
-        if let Some((i,_))=best { self.targets[i].alive=false; self.kills+=1; }
+        if self.ammo <= 0 {
+            if self.reserve <= 0 {
+                self.reserve = 60; // training yard resupply
+            }
+            self.start_reload();
+            return;
+        }
+        self.ammo -= 1;
+        self.fire_cd = 0.18;
+
+        // Hitscan from the camera through the crosshair.
+        let o = self.cam_pos();
+        let d = self.aim_dir();
+        let mut end = o + d * MAX_DIST;
+        let mut hit: Option<usize> = None;
+        let mut t = 0.0f32;
+        'march: while t < MAX_DIST {
+            t += 0.04;
+            let p = o + d * t;
+            if p.y < 0.0 || height_at(p.x, p.z) > p.y {
+                end = p;
+                break;
+            }
+            for (i, tg) in self.targets.iter().enumerate() {
+                if !tg.alive {
+                    continue;
+                }
+                let dx = p.x - tg.x;
+                let dz = p.z - tg.z;
+                if dx * dx + dz * dz < 0.09 && p.y <= 1.05 {
+                    hit = Some(i);
+                    end = p;
+                    break 'march;
+                }
+            }
+        }
+        if let Some(i) = hit {
+            self.targets[i].alive = false;
+            self.targets[i].respawn = 4.0;
+            self.kills += 1;
+            self.hit_t = 0.25;
+        }
+
+        let f = vec3(self.yaw.cos(), 0.0, self.yaw.sin());
+        let muzzle = vec3(self.x, self.y + 0.55, self.z) + f * 0.6 + self.right() * 0.18;
+        self.tracer = Some((muzzle, end));
+        self.tracer_t = 0.07;
     }
-    fn start_reload(&mut self) { if self.reloading<=0.0 && self.ammo<12 && self.reserve>0 {self.reloading=1.25;} }
 }
 
-fn wrap_angle(mut a:f32)->f32 { while a>std::f32::consts::PI {a-=2.0*std::f32::consts::PI;} while a < -std::f32::consts::PI {a+=2.0*std::f32::consts::PI;} a }
-fn button(rect:Rect,label:&str,active:bool) {
-    draw_rectangle(rect.x,rect.y,rect.w,rect.h, if active {Color::new(0.23,0.62,0.78,0.78)} else {Color::new(0.04,0.08,0.12,0.62)});
-    draw_rectangle_lines(rect.x,rect.y,rect.w,rect.h,1.5,Color::new(0.8,0.92,1.0,0.75));
-    let size=if rect.w<58.0 {12.0}else{15.0}; let m=measure_text(label,None,size as u16,1.0);
-    draw_text(label,rect.x+(rect.w-m.width)/2.0,rect.y+(rect.h+m.height*0.55)/2.0,size,WHITE);
-}
-fn inside(p:Vec2,r:Rect)->bool {p.x>=r.x&&p.x<=r.x+r.w&&p.y>=r.y&&p.y<=r.y+r.h}
-fn cast(sx:f32,sy:f32,angle:f32)->(f32,bool) {
-    let (rx,ry)=(angle.cos(),angle.sin()); let(mut mx,mut my)=(sx.floor() as i32,sy.floor() as i32);
-    let dx=if rx.abs()<0.00001 {1e9}else{(1.0/rx).abs()}; let dy=if ry.abs()<0.00001 {1e9}else{(1.0/ry).abs()};
-    let stepx=if rx<0.0 {-1}else{1}; let stepy=if ry<0.0 {-1}else{1};
-    let mut side_x=if rx<0.0 {(sx-mx as f32)*dx}else{(mx as f32+1.0-sx)*dx};
-    let mut side_y=if ry<0.0 {(sy-my as f32)*dy}else{(my as f32+1.0-sy)*dy};
-    for _ in 0..64 { let side=if side_x<side_y {side_x+=dx;mx+=stepx;0}else{side_y+=dy;my+=stepy;1};
-        if mx<0||my<0||my>=MAP.len() as i32||mx>=MAP[0].len() as i32 {return (MAX_DIST,true)}
-        if MAP[my as usize].as_bytes()[mx as usize]==b'#' {return ((if side==0 {side_x-dx}else{side_y-dy}).max(0.01),side==1)} }
-    (MAX_DIST,true)
+// ---------------------------------------------------------------------------
+// Touch controls
+// ---------------------------------------------------------------------------
+#[derive(Clone, Copy, PartialEq)]
+enum Action {
+    Fire,
+    Jump,
+    Reload,
+    Scope,
+    Sneak,
+    Slide,
 }
 
-#[macroquad::main("Rusty FPS Sketch")]
+#[derive(Clone, Copy, PartialEq)]
+enum Role {
+    Joy,
+    Look,
+    Btn,
+}
+
+struct Pad {
+    c: Vec2,
+    r: f32,
+}
+
+struct Layout {
+    u: f32,
+    joy_home: Vec2,
+    joy_r: f32,
+    fire: Pad,
+    jump: Pad,
+    reload: Pad,
+    scope: Pad,
+    sneak: Pad,
+    slide: Pad,
+}
+
+impl Layout {
+    fn new(w: f32, h: f32) -> Self {
+        let u = (h / 720.0).clamp(0.75, 1.8);
+        Self {
+            u,
+            joy_home: vec2(150.0 * u, h - 150.0 * u),
+            joy_r: 85.0 * u,
+            fire: Pad { c: vec2(w - 115.0 * u, h - 100.0 * u), r: 58.0 * u },
+            jump: Pad { c: vec2(w - 115.0 * u, h - 228.0 * u), r: 44.0 * u },
+            reload: Pad { c: vec2(w - 240.0 * u, h - 85.0 * u), r: 40.0 * u },
+            scope: Pad { c: vec2(w - 220.0 * u, h - 210.0 * u), r: 40.0 * u },
+            sneak: Pad { c: vec2(w - 350.0 * u, h - 95.0 * u), r: 38.0 * u },
+            slide: Pad { c: vec2(w - 350.0 * u, h - 215.0 * u), r: 38.0 * u },
+        }
+    }
+
+    fn pads(&self) -> [(Action, &Pad); 6] {
+        [
+            (Action::Fire, &self.fire),
+            (Action::Jump, &self.jump),
+            (Action::Reload, &self.reload),
+            (Action::Scope, &self.scope),
+            (Action::Sneak, &self.sneak),
+            (Action::Slide, &self.slide),
+        ]
+    }
+
+    fn hit(&self, p: Vec2) -> Option<Action> {
+        let mut best = None;
+        let mut best_d = f32::MAX;
+        for (a, pad) in self.pads() {
+            let d = p.distance(pad.c);
+            if d <= pad.r * 1.2 && d < best_d {
+                best = Some(a);
+                best_d = d;
+            }
+        }
+        best
+    }
+
+    // Keep the floating joystick base fully on screen.
+    fn clamp_origin(&self, p: Vec2, w: f32, h: f32) -> Vec2 {
+        let m = self.joy_r + 10.0 * self.u;
+        vec2(p.x.clamp(m, (w - m).max(m)), p.y.clamp(m, (h - m).max(m)))
+    }
+}
+
+fn draw_pad(p: &Pad, label: &str, active: bool, u: f32) {
+    let fill = if active {
+        Color::new(0.23, 0.62, 0.78, 0.80)
+    } else {
+        Color::new(0.04, 0.08, 0.12, 0.55)
+    };
+    draw_circle(p.c.x, p.c.y, p.r, fill);
+    draw_circle_lines(p.c.x, p.c.y, p.r, 2.5 * u, Color::new(0.8, 0.92, 1.0, 0.85));
+    let size = (p.r * 0.36).max(12.0);
+    let m = measure_text(label, None, size as u16, 1.0);
+    draw_text(label, p.c.x - m.width / 2.0, p.c.y + m.height * 0.35, size, WHITE);
+}
+
+// ---------------------------------------------------------------------------
+// Drawing the world
+// ---------------------------------------------------------------------------
+fn draw_world(b: &mut Batch) {
+    for (gz, row) in MAP.iter().enumerate() {
+        for (gx, ch) in row.bytes().enumerate() {
+            let x = gx as f32;
+            let z = gz as f32;
+            if ch == b'#' {
+                b.aabb(
+                    vec3(x + 0.5, WALL_H * 0.5, z + 0.5),
+                    vec3(0.5, WALL_H * 0.5, 0.5),
+                    Color::new(0.27, 0.48, 0.57, 1.0),
+                );
+            } else {
+                let c = if (gx + gz) % 2 == 0 {
+                    Color::new(0.20, 0.25, 0.23, 1.0)
+                } else {
+                    Color::new(0.16, 0.20, 0.19, 1.0)
+                };
+                b.quad(
+                    [vec3(x, 0.0, z + 1.0), vec3(x + 1.0, 0.0, z + 1.0), vec3(x + 1.0, 0.0, z), vec3(x, 0.0, z)],
+                    c,
+                );
+                if ch == b'c' {
+                    b.aabb(
+                        vec3(x + 0.5, CRATE_H * 0.5, z + 0.5),
+                        vec3(0.46, CRATE_H * 0.5, 0.46),
+                        Color::new(0.70, 0.48, 0.26, 1.0),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn draw_target(b: &mut Batch, tg: &Target, px: f32, pz: f32) {
+    let yaw = (pz - tg.z).atan2(px - tg.x); // face the player
+    let p = vec3(tg.x, 0.0, tg.z);
+    b.obox(p + vec3(0.0, 0.17, 0.0), yaw, 0.07, 0.17, 0.12, Color::new(0.45, 0.46, 0.48, 1.0));
+    b.obox(p + vec3(0.0, 0.52, 0.0), yaw, 0.11, 0.20, 0.20, Color::new(0.72, 0.18, 0.15, 1.0));
+    b.obox(p + vec3(0.0, 0.86, 0.0), yaw, 0.10, 0.10, 0.10, Color::new(0.88, 0.59, 0.32, 1.0));
+}
+
+fn draw_player(b: &mut Batch, g: &Game) {
+    let k = if g.slide > 0.0 { 0.5 } else if g.sneaking { 0.78 } else { 1.0 };
+    let yaw = g.yaw;
+    let base = vec3(g.x, g.y, g.z);
+    let f = vec3(yaw.cos(), 0.0, yaw.sin());
+    let r = vec3(-yaw.sin(), 0.0, yaw.cos());
+
+    // soft shadow so jumps read clearly
+    let sy = g.ground(g.y) + 0.012;
+    b.quad(
+        [
+            vec3(g.x - 0.3, sy, g.z + 0.3),
+            vec3(g.x + 0.3, sy, g.z + 0.3),
+            vec3(g.x + 0.3, sy, g.z - 0.3),
+            vec3(g.x - 0.3, sy, g.z - 0.3),
+        ],
+        Color::new(0.0, 0.0, 0.0, 0.35),
+    );
+
+    // legs (swing while walking)
+    let sw = (g.walk * 2.0).sin() * 0.14 * g.moving.min(1.0);
+    for s in [-1.0f32, 1.0] {
+        let off = r * (0.10 * s) + f * (sw * s);
+        b.obox(base + off + vec3(0.0, 0.17 * k, 0.0), yaw, 0.07, 0.17 * k, 0.07, Color::new(0.16, 0.18, 0.22, 1.0));
+    }
+    // torso, head, visor
+    b.obox(base + vec3(0.0, 0.55 * k, 0.0), yaw, 0.11, 0.20 * k, 0.21, Color::new(0.25, 0.60, 0.50, 1.0));
+    b.obox(base + vec3(0.0, 0.90 * k, 0.0), yaw, 0.10, 0.10, 0.10, Color::new(0.90, 0.70, 0.55, 1.0));
+    b.obox(base + vec3(0.0, 0.92 * k, 0.0) + f * 0.09, yaw, 0.02, 0.04, 0.09, Color::new(0.08, 0.09, 0.12, 1.0));
+
+    // arm + gun, tilted to follow where you aim
+    let d = g.aim_dir();
+    let up_axis = r.cross(d);
+    let chest = base + vec3(0.0, 0.56 * k, 0.0);
+    b.obox(chest + f * 0.20 + r * 0.20, yaw, 0.18, 0.05, 0.05, Color::new(0.20, 0.50, 0.42, 1.0));
+    let gc = chest + f * 0.38 + r * 0.20;
+    b.boxed(gc, d * 0.30, up_axis * 0.045, r * 0.045, Color::new(0.12, 0.13, 0.15, 1.0));
+    if g.tracer_t > 0.04 {
+        b.aabb(gc + d * 0.36, vec3(0.06, 0.06, 0.06), Color::new(1.0, 0.85, 0.3, 1.0));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+#[macroquad::main("Marikina FPS")]
 async fn main() {
-    let mut g=Game::new();
-    loop {
-        let dt=get_frame_time().min(0.05); let w=screen_width(); let h=screen_height();
-        let mobile=cfg!(target_os="android") || w < 900.0 || !touches().is_empty();
-        let pad=if mobile {12.0}else{16.0};
-        let bw=(w*0.105).clamp(54.0,78.0); let bh=44.0; let gap=7.0;
-        let fire=Rect::new(w-pad-bw,h-pad-bh,bw,bh);
-        let scope=Rect::new(w-pad-bw,h-pad-bh*2.0-gap,bw,bh);
-        let reload=Rect::new(w-pad-bw,h-pad-bh*3.0-gap*2.0,bw,bh);
-        let jump=Rect::new(w-pad-bw*2.0-gap,h-pad-bh,bw,bh);
-        let slide=Rect::new(w-pad-bw*2.0-gap,h-pad-bh*2.0-gap,bw,bh);
-        let sneak=Rect::new(w-pad-bw*2.0-gap,h-pad-bh*3.0-gap*2.0,bw,bh);
-        let mut move_x=0.0; let mut move_y=0.0; let mut look_delta=Vec2::ZERO;
-        if is_key_down(KeyCode::W)||is_key_down(KeyCode::Up){move_y+=1.0;} if is_key_down(KeyCode::S)||is_key_down(KeyCode::Down){move_y-=1.0;}
-        if is_key_down(KeyCode::D){move_x+=1.0;} if is_key_down(KeyCode::A){move_x-=1.0;}
-        let mut fire_down=is_mouse_button_down(MouseButton::Left); let mut scope_down=is_mouse_button_down(MouseButton::Right);
-        let mut jump_press=is_key_pressed(KeyCode::Space); let mut reload_press=is_key_pressed(KeyCode::R);
-        let slide_down=is_key_down(KeyCode::LeftShift); let sneak_down=is_key_down(KeyCode::LeftControl);
-        if !mobile && is_mouse_button_down(MouseButton::Left) { let d=mouse_delta_position(); look_delta+=d*Vec2::new(w,h)*-1.0; }
-        if mobile {
-            let center=Vec2::new(86.0,h-95.0); let radius=62.0;
-            draw_circle(center.x,center.y,radius,Color::new(0.04,0.08,0.12,0.43));
-            draw_circle_lines(center.x,center.y,radius,2.0,Color::new(0.8,0.92,1.0,0.6));
-            let active=g.touch_prev.clone(); let mut next=HashMap::new();
-            for t in touches() { next.insert(t.id,t.position); if let Some(prev)=active.get(&t.id) { if prev.x>110.0 && ![fire,scope,reload,jump,slide,sneak].iter().any(|r|inside(t.position,*r)) {look_delta+=t.position-*prev;} } }
-            for p in next.values() { if p.x<155.0 && p.y>h-210.0 { let v=(*p-center)/radius; move_x+=v.x.clamp(-1.0,1.0); move_y-=v.y.clamp(-1.0,1.0); draw_circle(center.x+v.x.clamp(-1.0,1.0)*31.0,center.y+v.y.clamp(-1.0,1.0)*31.0,20.0,Color::new(0.8,0.92,1.0,0.65)); }
-                fire_down|=inside(*p,fire); scope_down|=inside(*p,scope); if inside(*p,jump){jump_press=true;} if inside(*p,reload){reload_press=true;} }
-            g.touch_prev=next;
-        }
-        if is_key_pressed(KeyCode::Escape) { break; }
-        if jump_press && g.jump<=0.0 {g.jump_v=4.6;}
-        if reload_press {g.start_reload();}
-        if is_key_pressed(KeyCode::F) {g.scoped=!g.scoped;}
-        g.scoped=scope_down || (g.scoped && !mobile);
-        g.sneaking=sneak_down || touches().iter().any(|t|inside(t.position,sneak));
-        if touches().iter().any(|t|inside(t.position,slide)) || slide_down {g.slide=0.55;}
-        if fire_down {g.shoot();}
-        g.angle=wrap_angle(g.angle+look_delta.x*0.0045); g.pitch=(g.pitch+look_delta.y*0.003).clamp(-0.45,0.45);
-        let speed=if g.slide>0.0 {4.8}else if g.sneaking {1.35}else{2.7};
-        let len=(move_x*move_x+move_y*move_y).sqrt().max(1.0); move_x/=len; move_y/=len;
-        let dx=(g.angle.cos()*move_y-g.angle.sin()*move_x)*speed*dt; let dy=(g.angle.sin()*move_y+g.angle.cos()*move_x)*speed*dt; g.move_by(dx,dy);
-        g.slide=(g.slide-dt).max(0.0); g.fire_cd=(g.fire_cd-dt).max(0.0);
-        if g.jump_v!=0.0 || g.jump>0.0 {g.jump+=g.jump_v*dt;g.jump_v-=11.5*dt;if g.jump<=0.0 {g.jump=0.0;g.jump_v=0.0;}}
-        if g.reloading>0.0 {g.reloading-=dt;if g.reloading<=0.0 {let n=(12-g.ammo).min(g.reserve);g.ammo+=n;g.reserve-=n;g.reloading=0.0;}}
-        for t in &mut g.targets {t.phase+=dt; if t.alive {t.x+=t.phase.sin()*dt*0.25;}}
+    let mut g = Game::new();
+    let mut roles: HashMap<u64, Role> = HashMap::new();
+    let mut last: HashMap<u64, Vec2> = HashMap::new();
+    let mut joy_origin: Option<Vec2> = None;
+    let mut touch_seen = false;
 
-        clear_background(Color::new(0.05,0.09,0.14,1.0));
-        let horizon=h*0.49+g.pitch*h*0.45-g.jump*14.0;
-        draw_rectangle(0.0,0.0,w,horizon,Color::new(0.11,0.17,0.24,1.0)); draw_rectangle(0.0,horizon,w,h-horizon,Color::new(0.16,0.16,0.15,1.0));
-        let cols=(w as usize).clamp(200,1000); let fw=w/cols as f32; let fov=if g.scoped {0.30}else{FOV}; let mut zbuf=vec![MAX_DIST;cols];
-        for i in 0..cols {let a=g.angle+((i as f32/cols as f32)-0.5)*fov; let (d,side)=cast(g.x,g.y,a);let corrected=(d*wrap_angle(a-g.angle).cos()).max(0.08);zbuf[i]=corrected;
-            let wall_h=(h*0.88/corrected).min(h*2.0);let shade=(1.0-corrected/MAX_DIST).clamp(0.15,0.9)*(if side {0.72}else{1.0});let col=Color::new(0.27*shade,0.48*shade,0.57*shade,1.0);
-            draw_rectangle(i as f32*fw,horizon-wall_h*0.5,fw+1.0,wall_h,col);
-            let floor_start=(horizon+wall_h*0.5).clamp(horizon,h); if floor_start<h {draw_rectangle(i as f32*fw,floor_start,fw+1.0,h-floor_start,Color::new(0.12,0.13,0.13,1.0));}
+    loop {
+        let dt = get_frame_time().min(0.05);
+        let w = screen_width();
+        let h = screen_height();
+        let ui = Layout::new(w, h);
+        let u = ui.u;
+
+        let touch_list = touches();
+        if !touch_list.is_empty() {
+            touch_seen = true;
         }
-        let mut order:Vec<usize>=(0..g.targets.len()).collect();order.sort_by(|a,b|{let da=(g.targets[*b].x-g.x).hypot(g.targets[*b].y-g.y);let db=(g.targets[*a].x-g.x).hypot(g.targets[*a].y-g.y);da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)});
-        for i in order {let t=&g.targets[i];if !t.alive {continue;}let dx=t.x-g.x;let dy=t.y-g.y;let d=dx.hypot(dy);let rel=wrap_angle(dy.atan2(dx)-g.angle);if rel.abs()>fov*0.62||d<0.2{continue;}let sx=w*0.5+(rel/fov)*w;let size=(h*0.34/d).clamp(8.0,h*0.55);let ci=((sx/w*cols as f32) as usize).min(cols-1);if zbuf[ci]+0.12<d{continue;}let y=horizon-size*0.45;
-            draw_circle(sx,y-size*0.27,size*0.19,Color::new(0.88,0.59,0.32,1.0));draw_rectangle(sx-size*0.20,y-size*0.12,size*0.40,size*0.62,Color::new(0.72,0.18,0.15,1.0));draw_rectangle(sx-size*0.13,y+size*0.42,size*0.10,size*0.3,GRAY);draw_rectangle(sx+size*0.03,y+size*0.42,size*0.10,size*0.3,GRAY);
+        let mobile = cfg!(target_os = "android") || touch_seen;
+
+        // forget fingers that are gone
+        roles.retain(|id, _| touch_list.iter().any(|t| t.id == *id));
+        last.retain(|id, _| touch_list.iter().any(|t| t.id == *id));
+        if !roles.values().any(|r| *r == Role::Joy) {
+            joy_origin = None;
         }
-        // Simple weapon silhouette, lowered while sliding.
-        let recoil=if g.fire_cd>0.13 {12.0}else{0.0};let gun_y=h-30.0+(if g.slide>0.0 {42.0}else{0.0})+recoil;
-        draw_rectangle(w*0.58,gun_y-72.0,70.0,106.0,Color::new(0.12,0.14,0.16,1.0));draw_rectangle(w*0.60,gun_y-103.0,54.0,46.0,Color::new(0.26,0.29,0.30,1.0));draw_rectangle(w*0.62,gun_y-116.0,12.0,20.0,Color::new(0.1,0.1,0.1,1.0));
-        draw_text("RUSTY FPS  /  TRAINING YARD",pad,27.0,22.0,WHITE);draw_text(&format!("HP {}     {} / {}",g.health,g.ammo,g.reserve),pad,55.0,21.0,Color::new(0.65,0.94,0.79,1.0));
-        draw_text(&format!("TARGETS {}     {}",g.kills,g.targets.iter().filter(|t|t.alive).count()),pad,82.0,17.0,Color::new(0.82,0.88,0.92,1.0));
-        if g.reloading>0.0 {draw_text("RELOADING...",w*0.5-58.0,h*0.73,20.0,WHITE);} if g.sneaking {draw_text("SNEAK",w*0.5-27.0,h-24.0,16.0,WHITE);} if g.slide>0.0 {draw_text("SLIDING",w*0.5-32.0,h-48.0,16.0,WHITE);}
-        // Crosshair / scope lens.
-        if g.scoped {let r=h.min(w)*0.37;draw_circle(w*0.5,horizon,r,Color::new(0.015,0.02,0.025,0.90));draw_circle_lines(w*0.5,horizon,r,3.0,Color::new(0.55,0.66,0.7,1.0));draw_line(w*0.5-r,horizon,w*0.5+r,horizon,1.0,Color::new(0.75,0.82,0.83,0.7));draw_line(w*0.5,horizon-r,w*0.5,horizon+r,1.0,Color::new(0.75,0.82,0.83,0.7));}else{draw_line(w*0.5-8.0,horizon,w*0.5+8.0,horizon,2.0,WHITE);draw_line(w*0.5,horizon-8.0,w*0.5,horizon+8.0,2.0,WHITE);}
-        if mobile {button(fire,"FIRE",fire_down);button(scope,"SCOPE",g.scoped);button(reload,"RELOAD",g.reloading>0.0);button(jump,"JUMP",g.jump>0.0);button(slide,"SLIDE",g.slide>0.0);button(sneak,"SNEAK",g.sneaking);}
+
+        let mut mv = Vec2::ZERO; // x = strafe right, y = forward
+        let mut look = Vec2::ZERO; // screen-style delta (down = positive)
+        let mut fire = false;
+        let mut jump = false;
+        let mut reload = false;
+        let mut scope_tap = false;
+        let mut sneak_tap = false;
+        let mut slide_tap = false;
+        let mut joy_knob: Option<Vec2> = None;
+
+        for t in &touch_list {
+            let p = t.position;
+            match t.phase {
+                TouchPhase::Started => {
+                    let role = if let Some(a) = ui.hit(p) {
+                        match a {
+                            Action::Jump => jump = true,
+                            Action::Reload => reload = true,
+                            Action::Scope => scope_tap = true,
+                            Action::Sneak => sneak_tap = true,
+                            Action::Slide => slide_tap = true,
+                            Action::Fire => {}
+                        }
+                        Role::Btn
+                    } else if p.x < w * 0.42 && p.y > h * 0.25 && !roles.values().any(|r| *r == Role::Joy) {
+                        joy_origin = Some(ui.clamp_origin(p, w, h));
+                        Role::Joy
+                    } else {
+                        Role::Look
+                    };
+                    roles.insert(t.id, role);
+                    last.insert(t.id, p);
+                }
+                TouchPhase::Ended | TouchPhase::Cancelled => {
+                    if roles.remove(&t.id) == Some(Role::Joy) {
+                        joy_origin = None;
+                    }
+                    last.remove(&t.id);
+                    continue;
+                }
+                _ => {}
+            }
+
+            match roles.get(&t.id).copied().unwrap_or(Role::Look) {
+                Role::Joy => {
+                    let origin = joy_origin.unwrap_or(ui.joy_home);
+                    let mut v = (p - origin) / ui.joy_r;
+                    if v.length() > 1.0 {
+                        v = v.normalize();
+                    }
+                    let dz = if v.length() < 0.1 { Vec2::ZERO } else { v };
+                    mv = vec2(dz.x, -dz.y);
+                    joy_knob = Some(origin + v * ui.joy_r);
+                }
+                Role::Look => {
+                    if let Some(prev) = last.get(&t.id) {
+                        look += p - *prev;
+                    }
+                    last.insert(t.id, p);
+                }
+                Role::Btn => {
+                    if ui.hit(p) == Some(Action::Fire) {
+                        fire = true;
+                    }
+                }
+            }
+        }
+
+        // Keyboard + mouse (desktop)
+        if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up) {
+            mv.y += 1.0;
+        }
+        if is_key_down(KeyCode::S) || is_key_down(KeyCode::Down) {
+            mv.y -= 1.0;
+        }
+        if is_key_down(KeyCode::D) {
+            mv.x += 1.0;
+        }
+        if is_key_down(KeyCode::A) {
+            mv.x -= 1.0;
+        }
+        if is_key_pressed(KeyCode::Space) {
+            jump = true;
+        }
+        if is_key_pressed(KeyCode::R) {
+            reload = true;
+        }
+        if is_key_pressed(KeyCode::F) {
+            scope_tap = true;
+        }
+        if is_key_pressed(KeyCode::C) {
+            sneak_tap = true;
+        }
+        if is_key_pressed(KeyCode::LeftShift) {
+            slide_tap = true;
+        }
+        if !mobile {
+            if is_mouse_button_down(MouseButton::Left) {
+                fire = true;
+            }
+            if is_mouse_button_down(MouseButton::Right) {
+                let d = mouse_delta_position();
+                look += vec2(-d.x * w * 0.5, d.y * h * 0.5);
+            }
+        }
+        if is_key_pressed(KeyCode::Escape) {
+            break;
+        }
+
+        // Apply actions
+        if scope_tap {
+            g.scoped = !g.scoped;
+        }
+        if sneak_tap {
+            g.sneak_on = !g.sneak_on;
+        }
+        g.sneaking = g.sneak_on || is_key_down(KeyCode::LeftControl);
+        if reload {
+            g.start_reload();
+        }
+        if jump && g.grounded {
+            g.vy = JUMP_V;
+            g.grounded = false;
+        }
+        if slide_tap && g.grounded && g.slide <= 0.0 {
+            let sf = vec2(g.yaw.cos(), g.yaw.sin());
+            let sr = vec2(-g.yaw.sin(), g.yaw.cos());
+            let sv = sf * mv.y + sr * mv.x;
+            g.slide_dir = if sv.length() > 0.1 { sv.normalize() } else { sf };
+            g.slide = 0.6;
+        }
+        if fire {
+            g.shoot();
+        }
+
+        // Look (drag up = look up)
+        let sens = if g.zoom > 0.5 { 0.5 } else { 1.0 };
+        g.yaw = (g.yaw + look.x / u * 0.0050 * sens).rem_euclid(TAU);
+        g.pitch = (g.pitch - look.y / u * 0.0035 * sens).clamp(-0.55, 0.5);
+
+        // Move relative to where the camera faces
+        if mv.length() > 1.0 {
+            mv = mv.normalize();
+        }
+        let f = vec2(g.yaw.cos(), g.yaw.sin());
+        let r = vec2(-g.yaw.sin(), g.yaw.cos());
+        let (dir, speed) = if g.slide > 0.0 {
+            (g.slide_dir, 3.0 + 5.0 * (g.slide / 0.6))
+        } else {
+            (f * mv.y + r * mv.x, if g.sneaking { 1.5 } else { 3.4 })
+        };
+        g.move_by(dir.x * speed * dt, dir.y * speed * dt);
+        g.moving = if g.slide > 0.0 { 0.0 } else { mv.length() };
+        g.walk += g.moving * speed * dt * 3.0;
+
+        // Vertical physics (jump, crates)
+        let prev_y = g.y;
+        g.vy -= GRAVITY * dt;
+        g.y += g.vy * dt;
+        let floor = g.ground(prev_y);
+        if g.y <= floor {
+            g.y = floor;
+            g.vy = 0.0;
+        }
+        g.grounded = g.y <= floor + 0.001;
+
+        // Timers
+        g.fire_cd = (g.fire_cd - dt).max(0.0);
+        g.slide = (g.slide - dt).max(0.0);
+        g.tracer_t = (g.tracer_t - dt).max(0.0);
+        g.hit_t = (g.hit_t - dt).max(0.0);
+        if g.reloading > 0.0 {
+            g.reloading -= dt;
+            if g.reloading <= 0.0 {
+                let n = (MAG - g.ammo).min(g.reserve);
+                g.ammo += n;
+                g.reserve -= n;
+                g.reloading = 0.0;
+            }
+        }
+        let zoom_goal = if g.scoped { 1.0 } else { 0.0 };
+        g.zoom += (zoom_goal - g.zoom) * (dt * 12.0).min(1.0);
+        for t in &mut g.targets {
+            t.phase += dt;
+            if t.alive {
+                t.x = t.x0 + (t.phase * 0.9).sin() * 0.9;
+            } else {
+                t.respawn -= dt;
+                if t.respawn <= 0.0 {
+                    t.alive = true;
+                }
+            }
+        }
+
+        // ------------------------------------------------------------ render
+        clear_background(Color::new(0.36, 0.52, 0.66, 1.0));
+
+        let cam = g.cam_pos();
+        let d = g.aim_dir();
+        set_camera(&Camera3D {
+            position: cam,
+            target: cam + d * 10.0,
+            up: vec3(0.0, 1.0, 0.0),
+            fovy: 1.05 - 0.6 * g.zoom,
+            ..Default::default()
+        });
+
+        let mut b = Batch::new();
+        draw_world(&mut b);
+        for tg in &g.targets {
+            if tg.alive {
+                draw_target(&mut b, tg, g.x, g.z);
+            }
+        }
+        draw_player(&mut b, &g);
+        if let Some((_, end)) = g.tracer {
+            if g.tracer_t > 0.0 {
+                b.aabb(end, vec3(0.05, 0.05, 0.05), Color::new(1.0, 0.8, 0.3, 1.0));
+            }
+        }
+        b.flush();
+        if let Some((from, to)) = g.tracer {
+            if g.tracer_t > 0.0 {
+                draw_line_3d(from, to, Color::new(1.0, 0.9, 0.4, 1.0));
+            }
+        }
+
+        // ------------------------------------------------------------ HUD
+        set_default_camera();
+        let cx = w * 0.5;
+        let cy = h * 0.5;
+
+        if g.zoom > 0.4 {
+            let a = ((g.zoom - 0.4) / 0.6).clamp(0.0, 1.0);
+            let s = h.min(w) * 0.92;
+            let x0 = (w - s) / 2.0;
+            let y0 = (h - s) / 2.0;
+            let dark = Color::new(0.0, 0.0, 0.0, 0.82 * a);
+            draw_rectangle(0.0, 0.0, x0, h, dark);
+            draw_rectangle(x0 + s, 0.0, w - x0 - s, h, dark);
+            draw_rectangle(x0, 0.0, s, y0, dark);
+            draw_rectangle(x0, y0 + s, s, h - y0 - s, dark);
+            let line = Color::new(0.75, 0.82, 0.83, 0.7 * a);
+            draw_circle_lines(cx, cy, s * 0.5, 3.0, Color::new(0.55, 0.66, 0.7, a));
+            draw_line(cx - s * 0.5, cy, cx + s * 0.5, cy, 1.0, line);
+            draw_line(cx, cy - s * 0.5, cx, cy + s * 0.5, 1.0, line);
+        } else {
+            let gap = 5.0 * u;
+            let len = 11.0 * u;
+            draw_line(cx - gap - len, cy, cx - gap, cy, 2.0, WHITE);
+            draw_line(cx + gap, cy, cx + gap + len, cy, 2.0, WHITE);
+            draw_line(cx, cy - gap - len, cx, cy - gap, 2.0, WHITE);
+            draw_line(cx, cy + gap, cx, cy + gap + len, 2.0, WHITE);
+        }
+        if g.hit_t > 0.0 {
+            let s = 12.0 * u;
+            let c = Color::new(1.0, 0.35, 0.3, 1.0);
+            draw_line(cx - s, cy - s, cx - s * 0.4, cy - s * 0.4, 3.0, c);
+            draw_line(cx + s, cy - s, cx + s * 0.4, cy - s * 0.4, 3.0, c);
+            draw_line(cx - s, cy + s, cx - s * 0.4, cy + s * 0.4, 3.0, c);
+            draw_line(cx + s, cy + s, cx + s * 0.4, cy + s * 0.4, 3.0, c);
+        }
+
+        let pad = 14.0 * u;
+        draw_text("RUSTY FPS  /  TRAINING YARD", pad, 27.0 * u, 22.0 * u, WHITE);
+        draw_text(
+            &format!("HP {}     {} / {}", g.health, g.ammo, g.reserve),
+            pad,
+            55.0 * u,
+            21.0 * u,
+            Color::new(0.65, 0.94, 0.79, 1.0),
+        );
+        draw_text(
+            &format!("TARGETS {}     {}", g.kills, g.targets.iter().filter(|t| t.alive).count()),
+            pad,
+            82.0 * u,
+            17.0 * u,
+            Color::new(0.82, 0.88, 0.92, 1.0),
+        );
+        if g.reloading > 0.0 {
+            draw_text("RELOADING...", cx - 70.0 * u, cy + h * 0.22, 26.0 * u, WHITE);
+        }
+
+        if mobile {
+            // floating joystick
+            let origin = joy_origin.unwrap_or(ui.joy_home);
+            draw_circle(origin.x, origin.y, ui.joy_r, Color::new(0.04, 0.08, 0.12, 0.42));
+            draw_circle_lines(origin.x, origin.y, ui.joy_r, 2.5 * u, Color::new(0.8, 0.92, 1.0, 0.6));
+            let knob = joy_knob.unwrap_or(origin);
+            draw_circle(knob.x, knob.y, ui.joy_r * 0.42, Color::new(0.8, 0.92, 1.0, 0.65));
+
+            draw_pad(&ui.fire, "FIRE", fire, u);
+            draw_pad(&ui.jump, "JUMP", !g.grounded, u);
+            draw_pad(&ui.reload, "RELOAD", g.reloading > 0.0, u);
+            draw_pad(&ui.scope, "SCOPE", g.scoped, u);
+            draw_pad(&ui.sneak, "SNEAK", g.sneaking, u);
+            draw_pad(&ui.slide, "SLIDE", g.slide > 0.0, u);
+        }
+
         next_frame().await
     }
 }
