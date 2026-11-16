@@ -1,1 +1,27 @@
+name: Android APK
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: android-actions/setup-android@v4
+      - name: Install Android SDK and NDK packages
+        run: sdkmanager "platforms;android-30" "build-tools;30.0.3" "ndk;27.2.12479018"
+      - name: Set Android NDK path
+        run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Install cargo-quad-apk
+        run: cargo install --git https://github.com/not-fl3/cargo-quad-apk.git --rev d411c8fe1c08339e46d7dc6b40ac04ea5e3a01b6 --locked
+      - name: Build debug-testable APK
+        run: cargo quad-apk build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marikina-fps-android-apk
+          path: target/android-artifacts/release/apk/*.apk
+          if-no-files-found: error
