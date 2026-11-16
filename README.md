@@ -1,6 +1,6 @@
 # Rusty FPS Sketch
 
-A small, browser-buildable FPS sketch in Rust. It uses a simple raycaster so the prototype stays self-contained and easy to change while you develop the Rusty Launcher game logic.
+A small third-person shooter sketch in Rust (macroquad 3D). Over-the-shoulder camera, a blocky character, a training yard with crates and moving targets.
 
 ## Run it
 
@@ -12,10 +12,10 @@ cargo run
 
 ## Controls
 
-- **Desktop:** WASD move, mouse look, Space jump, Shift slide, Ctrl sneak, right mouse scope, left mouse fire, R reload.
-- **Touch:** left joystick moves; drag the right side to look; use the labeled buttons for slide, jump, scope, fire, reload, and sneak.
+- **Touch:** floating joystick on the left (touch anywhere on the left side), drag the right side to look. Buttons: FIRE (hold), JUMP, RELOAD, SCOPE (toggle), SNEAK (toggle), SLIDE.
+- **Desktop:** WASD move, hold right mouse and move to look, left mouse fire, Space jump, R reload, F scope, C or Ctrl sneak, Shift slide, Esc quit.
 
-The game is an early gameplay sketch: it has a small arena, moving targets, a magazine, reload timing, jumping, sliding, sneaking, and scoped aim. Tweak the constants and arena in `src/main.rs` as the launcher design takes shape.
+Crates are low enough to jump over or stand on. Targets respawn after a few seconds.
 
 ## Android APK
 
