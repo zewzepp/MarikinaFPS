@@ -505,7 +505,7 @@ async fn main() {
 
         draw_sky(&atlas, cam, g.t);
         let mut b = Batch::new(&atlas, cam);
-        city.draw(&mut b, cam, d);
+        city.draw(&mut b, cam, d, fov);
         for tg in &g.targets {
             if tg.alive {
                 let dx = tg.x - cam.x;

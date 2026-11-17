@@ -98,6 +98,7 @@ pub struct Batch {
     white: Vec2,
     xo: Vec3,
     xs: f32,
+    pub nofog: bool,
 }
 
 impl Batch {
@@ -111,6 +112,7 @@ impl Batch {
             white: tile_uv(T_WHITE, 0.5, 0.5),
             xo: Vec3::ZERO,
             xs: 1.0,
+            nofog: false,
         }
     }
 
@@ -141,6 +143,9 @@ impl Batch {
     }
 
     fn fogc(&self, p: Vec3, c: Color) -> Color {
+        if self.nofog {
+            return c;
+        }
         let d = (p - self.cam).length();
         let t = ((d - FOG_START) / (FOG_END - FOG_START)).clamp(0.0, 1.0);
         if t <= 0.0 {
@@ -163,7 +168,7 @@ impl Batch {
             self.v.push(Vertex::new(pk.x, pk.y, pk.z, uv[k].x, uv[k].y, col));
         }
         self.i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        if self.v.len() > 2800 {
+        if self.v.len() > 2800 || self.i.len() > 4000 {
             self.flush();
         }
     }
@@ -171,6 +176,20 @@ impl Batch {
     // pre-built static quad (with back-face culling)
     pub fn push(&mut self, q: &Quad) {
         if q.n != Vec3::ZERO && q.n.dot(self.cam - q.v[0].p) <= 0.0 {
+            return;
+        }
+        if q.v[2].p == q.v[3].p {
+            // triangle stored as a degenerate quad: emit 3 verts / 3 indices
+            let base = self.v.len() as u16;
+            for k in 0..3 {
+                let pk = self.xf(q.v[k].p);
+                let col = self.fogc(pk, q.v[k].c);
+                self.v.push(Vertex::new(pk.x, pk.y, pk.z, q.v[k].uv.x, q.v[k].uv.y, col));
+            }
+            self.i.extend_from_slice(&[base, base + 1, base + 2]);
+            if self.i.len() > 4000 {
+                self.flush();
+            }
             return;
         }
         self.raw(

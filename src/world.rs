@@ -8,7 +8,7 @@ pub const PERIOD: f32 = 44.0;
 pub const NB: usize = 1;
 pub const SIZE: f32 = 52.0; // compact cargo arena
 pub const CURB: f32 = 0.12;
-const CH: f32 = 32.0;
+const CH: f32 = 6.0;
 pub const GC: f32 = 8.0;
 pub const GN: usize = 7;
 
@@ -40,6 +40,7 @@ pub struct PropSpawn {
 
 pub struct Chunk {
     pub c: Vec3,
+    pub r: f32,
     pub quads: Vec<Quad>,
 }
 
@@ -68,19 +69,29 @@ impl World {
         h
     }
 
-    pub fn draw(&self, b: &mut Batch, cam: Vec3, fwd: Vec3) {
+    pub fn draw(&self, b: &mut Batch, cam: Vec3, fwd: Vec3, fov: f32) {
+        let aspect = screen_width() / screen_height().max(1.0);
+        let half = ((fov * 0.5).tan() * (1.0 + aspect * aspect).sqrt()).atan() + 0.05;
+        let fwd = fwd.normalize_or_zero();
         for ch in &self.chunks {
             let d = ch.c - cam;
-            if d.length() > VIEW_DIST + 30.0 {
+            let dist = d.length();
+            if dist > VIEW_DIST + ch.r {
                 continue;
             }
-            if d.dot(fwd) < -30.0 {
-                continue;
+            if dist > ch.r {
+                let cosang = (d.dot(fwd) / dist).clamp(-1.0, 1.0);
+                let lim = half + (ch.r / dist).min(1.0).asin();
+                if cosang.acos() > lim {
+                    continue;
+                }
             }
+            b.nofog = dist + ch.r < FOG_START;
             for q in &ch.quads {
                 b.push(q);
             }
         }
+        b.nofog = false;
     }
 }
 
@@ -441,7 +452,8 @@ pub fn build_world() -> World {
         let a = vertex(0);
         let m = vertex(3);
         let c = vertex(6);
-        b.push([a.p, m.p, c.p, c.p], Vec3::ZERO, [white_uv; 4], T_WHITE, [col; 4]);
+        let nrm = (m.p - a.p).cross(c.p - a.p).normalize_or_zero();
+        b.push([a.p, m.p, c.p, c.p], nrm, [white_uv; 4], T_WHITE, [col; 4]);
     }
     for line in include_str!("../assets/dockyard/dockyard-collisions.txt").lines() {
         let values: Vec<f32> = line.split(',').filter_map(|v| v.parse().ok()).collect();
@@ -480,8 +492,17 @@ pub fn build_world() -> World {
     }
     let mut chunks = Vec::new();
     for ((kx, kz), quads) in b.q.into_iter() {
-        let c = vec3((kx as f32 + 0.5) * CH, 8.0, (kz as f32 + 0.5) * CH);
-        chunks.push(Chunk { c, quads });
+        let mut mn = Vec3::splat(f32::MAX);
+        let mut mx = Vec3::splat(f32::MIN);
+        for q in &quads {
+            for v in &q.v {
+                mn = mn.min(v.p);
+                mx = mx.max(v.p);
+            }
+        }
+        let c = (mn + mx) * 0.5;
+        let r = (mx - mn).length() * 0.5 + 0.1;
+        chunks.push(Chunk { c, r, quads });
     }
     World { boxes: b.boxes, grid, chunks, spawns: b.spawns, props: b.props }
 }
