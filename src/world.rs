@@ -9,8 +9,8 @@ pub const NB: usize = 4;
 pub const SIZE: f32 = NB as f32 * PERIOD + ROAD; // 136 x 136 units
 pub const CURB: f32 = 0.12;
 const CH: f32 = 32.0;
-const GC: f32 = 8.0;
-const GN: usize = NB * 4 + 1;
+pub const GC: f32 = 8.0;
+pub const GN: usize = NB * 4 + 1;
 
 #[derive(Clone, Copy)]
 pub struct BoxC {
@@ -19,6 +19,23 @@ pub struct BoxC {
     pub x1: f32,
     pub z1: f32,
     pub h: f32,
+}
+
+// kinds of smashable props
+pub const P_CRATE: u8 = 0;
+pub const P_BENCH: u8 = 1;
+pub const P_CONE: u8 = 2;
+pub const P_BIN: u8 = 3;
+pub const P_BARREL: u8 = 4;
+
+#[derive(Clone, Copy)]
+pub struct PropSpawn {
+    pub kind: u8,
+    pub x: f32,
+    pub z: f32,
+    pub y0: f32,
+    pub along_x: bool,
+    pub seed: u32,
 }
 
 pub struct Chunk {
@@ -31,6 +48,7 @@ pub struct World {
     grid: Vec<Vec<usize>>,
     pub chunks: Vec<Chunk>,
     pub spawns: Vec<(f32, f32, bool)>, // x, z, patrols along x
+    pub props: Vec<PropSpawn>,
 }
 
 impl World {
@@ -70,6 +88,7 @@ struct B {
     q: HashMap<(i32, i32), Vec<Quad>>,
     boxes: Vec<BoxC>,
     spawns: Vec<(f32, f32, bool)>,
+    props: Vec<PropSpawn>,
 }
 
 fn tint(r: f32, g: f32, b: f32) -> Color {
@@ -219,16 +238,15 @@ impl B {
     }
 
     fn crate_(&mut self, x: f32, z: f32, s: u32) {
-        let k = 0.85 + hash(s as i32, 4, 9) * 0.3;
-        self.prop(x, z, CURB, 0.44 * k, 0.5, 0.44 * k, T_WOOD, tint(1.0, 0.95, 0.9));
-        self.solid(x - 0.44 * k, z - 0.44 * k, x + 0.44 * k, z + 0.44 * k, CURB + 0.5);
+        self.props.push(PropSpawn { kind: P_CRATE, x, z, y0: CURB, along_x: false, seed: s });
     }
 
     fn bench(&mut self, x: f32, z: f32, along_x: bool) {
-        let (hx, hz) = if along_x { (0.8, 0.22) } else { (0.22, 0.8) };
-        self.prop(x, z, CURB + 0.30, hx, 0.08, hz, T_WOOD, tint(0.9, 0.85, 0.8));
-        self.prop(x, z, CURB, hx * 0.9, 0.30, hz * 0.9, T_METAL, tint(0.5, 0.5, 0.52));
-        self.solid(x - hx, z - hz, x + hx, z + hz, CURB + 0.4);
+        self.props.push(PropSpawn { kind: P_BENCH, x, z, y0: CURB, along_x, seed: 0 });
+    }
+
+    fn smash(&mut self, kind: u8, x: f32, z: f32, s: u32) {
+        self.props.push(PropSpawn { kind, x, z, y0: CURB, along_x: false, seed: s });
     }
 
     fn block(&mut self, bi: usize, bj: usize) {
@@ -266,6 +284,24 @@ impl B {
         for (k, (tx, tz)) in [(12.0f32, 1.8f32), (12.0, 22.2), (1.8, 12.0), (22.2, 12.0)].iter().enumerate() {
             if hash(seed as i32, k as i32, 4) > 0.45 {
                 self.tree(ox + tx, oz + tz, seed + k as u32);
+            }
+        }
+
+        // street clutter on the sidewalk ring: bins and rows of traffic cones
+        if hash(seed as i32, 7, 61) > 0.35 {
+            self.smash(P_BIN, ox + 3.3, oz + 1.4, seed + 100);
+        }
+        if hash(seed as i32, 8, 62) > 0.35 {
+            self.smash(P_BIN, ox + 20.7, oz + 22.6, seed + 101);
+        }
+        if hash(seed as i32, 9, 63) > 0.4 {
+            for k in 0..4 {
+                self.smash(P_CONE, ox + 6.0 + k as f32 * 1.4, oz + 21.8, seed + 110 + k as u32);
+            }
+        }
+        if hash(seed as i32, 10, 64) > 0.5 {
+            for k in 0..3 {
+                self.smash(P_CONE, ox + 1.8, oz + 6.0 + k as f32 * 1.5, seed + 120 + k as u32);
             }
         }
 
@@ -332,6 +368,9 @@ impl B {
                     self.prop(ix0 + 4.0, cz, CURB, 3.0, 2.6, 1.2, T_METAL, cols[(k + bi) % 3]);
                     self.solid(ix0 + 1.0, cz - 1.2, ix0 + 7.0, cz + 1.2, CURB + 2.6);
                 }
+                for k in 0..4 {
+                    self.smash(P_BARREL, ox + 21.6, oz + 5.5 + k as f32 * 1.3, seed + 140 + k as u32);
+                }
                 for k in 0..9 {
                     let fx = ix0 + 9.0 + hash(seed as i32, k, 51) * 6.0;
                     let fz = iz0 + 5.0 + hash(seed as i32, k, 52) * 9.0;
@@ -391,7 +430,7 @@ impl B {
 }
 
 pub fn build_world() -> World {
-    let mut b = B { q: HashMap::new(), boxes: Vec::new(), spawns: Vec::new() };
+    let mut b = B { q: HashMap::new(), boxes: Vec::new(), spawns: Vec::new(), props: Vec::new() };
     b.roads();
     for bi in 0..NB {
         for bj in 0..NB {
@@ -423,5 +462,5 @@ pub fn build_world() -> World {
         let c = vec3((kx as f32 + 0.5) * CH, 8.0, (kz as f32 + 0.5) * CH);
         chunks.push(Chunk { c, quads });
     }
-    World { boxes: b.boxes, grid, chunks, spawns: b.spawns }
+    World { boxes: b.boxes, grid, chunks, spawns: b.spawns, props: b.props }
 }

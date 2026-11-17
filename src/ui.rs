@@ -70,6 +70,7 @@ pub enum Role {
     Joy,
     Look,
     Btn,
+    Hold(usize),
     Win,
     Drag(usize),
 }

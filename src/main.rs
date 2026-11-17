@@ -43,7 +43,7 @@ async fn main() {
 
     let mut screen = Screen::Play;
     let saved = save::load();
-    sfx.master = saved.volume;
+    sfx.set_master(saved.volume);
     let mut slide_hold = saved.slide_hold; // false = tap to slide, true = hold to slide
     let mut cfg: Option<[ElemCfg; 6]> = saved.cfg;
     let mut last_saved = String::new();
@@ -155,7 +155,13 @@ async fn main() {
                             Elem::Snk => snk_tap = true,
                             _ => {}
                         }
-                        Role::Btn
+                        // Fire / Slide stay bound to this finger until it lifts, so
+                        // other fingers (stick, look, other buttons) can never steal them
+                        if e == Elem::Fire || e == Elem::Snk {
+                            Role::Hold(e as usize)
+                        } else {
+                            Role::Btn
+                        }
                     } else if g.zoom > 0.5 && p.distance(zp[0].c) <= zp[0].r * 1.2 {
                         zoom_step = 1;
                         Role::Btn
@@ -199,11 +205,22 @@ async fn main() {
                     }
                     last.insert(t.id, p);
                 }
-                Role::Btn => match ui.hit(p) {
-                    Some(Elem::Fire) => fire = true,
-                    Some(Elem::Snk) => snk_held = true,
-                    _ => {}
-                },
+                Role::Hold(i) => {
+                    let pad = &ui.pads[i];
+                    // forgiving: the thumb may wander well outside the circle
+                    if p.distance(pad.c) <= pad.r * 2.2 {
+                        if i == Elem::Fire as usize {
+                            fire = true;
+                            // aim while firing with the same thumb
+                            if let Some(prev) = last.get(&t.id) {
+                                look += p - *prev;
+                            }
+                            last.insert(t.id, p);
+                        } else {
+                            snk_held = true;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -341,10 +358,10 @@ async fn main() {
                         slide_hold = true;
                     }
                     if tapped(btn(1, 150.0, 56.0)) {
-                        sfx.master = (((sfx.master - 0.1) * 10.0).round() / 10.0).max(0.0);
+                        sfx.set_master((((sfx.master - 0.1) * 10.0).round() / 10.0).max(0.0));
                     }
                     if tapped(btn(1, 286.0, 56.0)) {
-                        sfx.master = (((sfx.master + 0.1) * 10.0).round() / 10.0).min(1.0);
+                        sfx.set_master((((sfx.master + 0.1) * 10.0).round() / 10.0).min(1.0));
                     }
                     if tapped(btn(1, 150.0, 56.0)) || tapped(btn(1, 286.0, 56.0)) {
                         sfx.play(Snd::Shot, 0.6);
@@ -486,6 +503,15 @@ async fn main() {
                 }
             }
         }
+        for p in &g.props.list {
+            if p.alive {
+                let dx = p.x - cam.x;
+                let dz = p.z - cam.z;
+                if dx * dx + dz * dz < 110.0 * 110.0 {
+                    render::draw_prop(&mut b, p, g.t);
+                }
+            }
+        }
         if g.zoom < 0.75 {
             render::draw_player(&mut b, &g, &city);
         }
@@ -587,7 +613,7 @@ async fn main() {
             match screen {
                 Screen::Settings => {
                     draw_text("SETTINGS   (drag here to move)", wp.x + 12.0 * u, wp.y + 25.0 * u, 18.0 * u, WHITE);
-                    draw_text(&format!("snd {}/13", sfx.loaded), wp.x + ws.x - 78.0 * u, wp.y + 25.0 * u, 16.0 * u, Color::new(0.7, 0.85, 1.0, 1.0));
+                    draw_text(&format!("snd {}/15", sfx.loaded), wp.x + ws.x - 78.0 * u, wp.y + 25.0 * u, 16.0 * u, Color::new(0.7, 0.85, 1.0, 1.0));
                     draw_text("Slide", wp.x + 14.0 * u, row_y(0) + 30.0 * u, 20.0 * u, txt);
                     ui_button(btn(0, 150.0, 120.0), "TAP", !slide_hold, u);
                     ui_button(btn(0, 282.0, 120.0), "HOLD", slide_hold, u);

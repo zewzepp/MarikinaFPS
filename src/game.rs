@@ -116,6 +116,119 @@ impl Target {
     }
 }
 
+pub struct Prop {
+    pub kind: u8,
+    pub x: f32,
+    pub z: f32,
+    pub y0: f32,
+    pub hx: f32,
+    pub hy: f32,
+    pub hz: f32,
+    pub along_x: bool,
+    pub seed: u32,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub alive: bool,
+    pub respawn: f32,
+    pub shake: f32,
+    pub col: Color,
+    pub col2: Color,
+}
+
+impl Prop {
+    fn make(sp: &PropSpawn) -> Self {
+        use crate::tex::hash;
+        let h = |n: i32| hash(sp.seed as i32, n, 991);
+        let c = |r: f32, g: f32, b: f32| Color::new(r, g, b, 1.0);
+        let (hx, hy, hz, hp, col, col2) = match sp.kind {
+            P_CRATE => {
+                let k = 0.85 + h(1) * 0.3;
+                (0.44 * k, 0.45, 0.44 * k, 3, c(0.62 + h(2) * 0.1, 0.45, 0.26), c(0.38, 0.26, 0.14))
+            }
+            P_BENCH => {
+                if sp.along_x {
+                    (0.8, 0.33, 0.22, 5, c(0.55, 0.38, 0.22), c(0.35, 0.36, 0.38))
+                } else {
+                    (0.22, 0.33, 0.8, 5, c(0.55, 0.38, 0.22), c(0.35, 0.36, 0.38))
+                }
+            }
+            P_CONE => (0.2, 0.33, 0.2, 1, c(0.95, 0.42, 0.08), c(0.95, 0.95, 0.92)),
+            P_BIN => (0.3, 0.45, 0.3, 2, c(0.20, 0.45 + h(3) * 0.2, 0.30), c(0.14, 0.30, 0.20)),
+            _ => (0.38, 0.55, 0.38, 4, c(0.75 - h(4) * 0.5, 0.20 + h(4) * 0.3, 0.18 + h(4) * 0.45), c(0.15, 0.15, 0.17)),
+        };
+        Self {
+            kind: sp.kind,
+            x: sp.x,
+            z: sp.z,
+            y0: sp.y0,
+            hx,
+            hy,
+            hz,
+            along_x: sp.along_x,
+            seed: sp.seed,
+            hp,
+            max_hp: hp,
+            alive: true,
+            respawn: 0.0,
+            shake: 0.0,
+            col,
+            col2,
+        }
+    }
+
+    // cones and bins are light: they do not block movement, they get knocked over
+    pub fn solid(&self) -> bool {
+        self.kind != P_CONE && self.kind != P_BIN
+    }
+}
+
+pub struct PropSet {
+    pub list: Vec<Prop>,
+    grid: Vec<Vec<usize>>,
+}
+
+impl PropSet {
+    fn new(spawns: &[PropSpawn]) -> Self {
+        let list: Vec<Prop> = spawns.iter().map(Prop::make).collect();
+        let mut grid: Vec<Vec<usize>> = vec![Vec::new(); GN * GN];
+        for (i, p) in list.iter().enumerate() {
+            let g0x = (((p.x - p.hx) / GC).floor().max(0.0) as usize).min(GN - 1);
+            let g1x = (((p.x + p.hx) / GC).floor().max(0.0) as usize).min(GN - 1);
+            let g0z = (((p.z - p.hz) / GC).floor().max(0.0) as usize).min(GN - 1);
+            let g1z = (((p.z + p.hz) / GC).floor().max(0.0) as usize).min(GN - 1);
+            for gz in g0z..=g1z {
+                for gx in g0x..=g1x {
+                    grid[gz * GN + gx].push(i);
+                }
+            }
+        }
+        Self { list, grid }
+    }
+
+    fn cell(&self, x: f32, z: f32) -> Option<&Vec<usize>> {
+        if x < 0.0 || z < 0.0 || x >= SIZE || z >= SIZE {
+            return None;
+        }
+        let gx = ((x / GC) as usize).min(GN - 1);
+        let gz = ((z / GC) as usize).min(GN - 1);
+        Some(&self.grid[gz * GN + gx])
+    }
+}
+
+// combined ground height: static city + solid, unbroken props
+fn hh(w: &World, ps: &PropSet, x: f32, z: f32) -> f32 {
+    let mut h = w.height_at(x, z);
+    if let Some(c) = ps.cell(x, z) {
+        for &i in c {
+            let p = &ps.list[i];
+            if p.alive && p.solid() && (x - p.x).abs() <= p.hx && (z - p.z).abs() <= p.hz {
+                h = h.max(p.y0 + p.hy * 2.0);
+            }
+        }
+    }
+    h
+}
+
 pub struct Debris {
     pub p: Vec3,
     pub v: Vec3,
@@ -176,6 +289,7 @@ pub struct Game {
     pub kills: u32,
     pub heads: u32,
     pub targets: Vec<Target>,
+    pub props: PropSet,
     pub debris: Vec<Debris>,
     pub parts: Vec<Part>,
     pub tracer: Option<(Vec3, Vec3)>,
@@ -245,6 +359,7 @@ impl Game {
             kills: 0,
             heads: 0,
             targets,
+            props: PropSet::new(&w.props),
             debris: Vec::new(),
             parts: Vec::new(),
             tracer: None,
@@ -266,13 +381,8 @@ impl Game {
     }
 
     pub fn k(&self) -> f32 {
-        if self.sliding {
-            0.5
-        } else if self.sneaking {
-            0.78
-        } else {
-            1.0
-        }
+        let kb = if self.sneaking { 0.78 } else { 1.0 };
+        kb + (0.5 - kb) * self.slide_a
     }
 
     pub fn feet(&self) -> Vec3 {
@@ -280,13 +390,13 @@ impl Game {
     }
 
     fn blocked(&self, w: &World, x: f32, z: f32) -> bool {
-        samples(x, z).iter().any(|(sx, sz)| w.height_at(*sx, *sz) > self.y + STEP)
+        samples(x, z).iter().any(|(sx, sz)| hh(w, &self.props, *sx, *sz) > self.y + STEP)
     }
 
     fn ground(&self, w: &World, ref_y: f32) -> f32 {
         let mut best = 0.0f32;
         for (sx, sz) in samples(self.x, self.z) {
-            let h = w.height_at(sx, sz);
+            let h = hh(w, &self.props, sx, sz);
             if h <= ref_y + STEP && h > best {
                 best = h;
             }
@@ -328,13 +438,8 @@ impl Game {
         let d = self.aim_dir();
         let r = self.right();
         let z = self.zoom;
-        let hgt = if self.sliding {
-            0.40
-        } else if self.sneaking {
-            0.62
-        } else {
-            0.78
-        };
+        let hb = if self.sneaking { 0.62 } else { 0.78 };
+        let hgt = hb + (0.40 - hb) * self.slide_a;
         let third = vec3(self.x, self.ys + hgt * S, self.z);
         let pivot = third + (self.eye() - third) * z;
         let dist = 4.0 * (1.0 - z);
@@ -345,7 +450,7 @@ impl Game {
         for i in 1..=steps {
             let f = i as f32 / steps as f32;
             let p = pivot + (want - pivot) * f;
-            if w.height_at(p.x, p.z) > p.y - 0.15 {
+            if hh(w, &self.props, p.x, p.z) > p.y - 0.15 {
                 let back = (i - 1) as f32 / steps as f32;
                 best = pivot + (want - pivot) * back;
                 break;
@@ -465,6 +570,157 @@ impl Game {
         self.burst(p, vec3(0.0, 1.0, 0.0) - dir * 0.3, 14, Color::new(0.9, 0.2, 0.15, 1.0), 3.0, 0.07);
     }
 
+    // first smashable prop along a ray (within tmax)
+    fn raycast_prop(&self, o: Vec3, d: Vec3, tmax: f32) -> Option<(f32, usize)> {
+        let mut t = 0.2f32;
+        while t < tmax {
+            t += 0.08;
+            let p = o + d * t;
+            if let Some(c) = self.props.cell(p.x, p.z) {
+                for &i in c {
+                    let pr = &self.props.list[i];
+                    if pr.alive
+                        && (p.x - pr.x).abs() <= pr.hx
+                        && (p.z - pr.z).abs() <= pr.hz
+                        && p.y >= pr.y0
+                        && p.y <= pr.y0 + pr.hy * 2.0
+                    {
+                        return Some((t, i));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn debris_piece(&mut self, p: Vec3, half: Vec3, col: Color, v: Vec3) {
+        let w = vec3(self.rf() - 0.5, self.rf() - 0.5, self.rf() - 0.5) * 18.0;
+        let q = Quat::from_rotation_y(self.rf() * TAU);
+        self.debris.push(Debris { p, v, q, w, half, col, life: 14.0, casing: false, bounces: 0 });
+    }
+
+    fn hit_prop(&mut self, i: usize, dir: Vec3, at: Vec3) {
+        self.props.list[i].hp -= 1;
+        if self.props.list[i].hp <= 0 {
+            self.break_prop(i, dir);
+            return;
+        }
+        let (kind, col) = (self.props.list[i].kind, self.props.list[i].col);
+        self.props.list[i].shake = 0.3;
+        self.burst(at, -dir + vec3(0.0, 0.5, 0.0), 6, col, 2.5, 0.05);
+        let snd = if kind == P_BARREL || kind == P_BIN { Snd::Clang } else { Snd::Impact };
+        self.ev.push((snd, 0.5));
+    }
+
+    fn break_prop(&mut self, i: usize, dir: Vec3) {
+        let (kind, x, z, y0, hx, hy, hz, ax, col, col2) = {
+            let p = &self.props.list[i];
+            (p.kind, p.x, p.z, p.y0, p.hx, p.hy, p.hz, p.along_x, p.col, p.col2)
+        };
+        self.props.list[i].alive = false;
+        self.props.list[i].respawn = 25.0;
+        let c = vec3(x, y0 + hy, z);
+        let dark = |c: Color, k: f32| Color::new(c.r * k, c.g * k, c.b * k, 1.0);
+        let mut pieces: Vec<(Vec3, Vec3, Color)> = Vec::new(); // offset, half, colour
+        match kind {
+            P_CRATE => {
+                for k in 0..9 {
+                    let off = vec3((self.rf() - 0.5) * hx * 1.5, (self.rf() - 0.5) * hy * 1.7, (self.rf() - 0.5) * hz * 1.5);
+                    let half = if k % 2 == 0 { vec3(hx * 0.9, 0.05, 0.065) } else { vec3(0.065, 0.05, hz * 0.9) };
+                    let shade = 0.8 + self.rf() * 0.35;
+                    pieces.push((off, half, dark(col, shade)));
+                }
+                for sx in [-1.0f32, 1.0] {
+                    pieces.push((vec3(sx * hx * 0.8, 0.0, 0.0), vec3(0.06, hy * 0.9, 0.06), col2));
+                }
+            }
+            P_BENCH => {
+                for k in 0..3 {
+                    let o = (k as f32 - 1.0) * 0.14;
+                    let (off, half) = if ax {
+                        (vec3(0.0, 0.0, o), vec3(hx * 0.95, 0.035, 0.055))
+                    } else {
+                        (vec3(o, 0.0, 0.0), vec3(0.055, 0.035, hz * 0.95))
+                    };
+                    pieces.push((off, half, dark(col, 0.85 + 0.1 * k as f32)));
+                }
+                let (lo, lh) = if ax { (vec3(hx * 0.8, -0.15, 0.0), vec3(0.05, 0.15, hz * 0.9)) } else { (vec3(0.0, -0.15, hz * 0.8), vec3(hx * 0.9, 0.15, 0.05)) };
+                pieces.push((lo, lh, col2));
+                pieces.push((-lo * vec3(1.0, 0.0, 1.0) + vec3(0.0, -0.15, 0.0), lh, col2));
+                let (bo, bh) = if ax { (vec3(0.0, 0.2, -hz * 0.85), vec3(hx * 0.95, 0.05, 0.02)) } else { (vec3(-hx * 0.85, 0.2, 0.0), vec3(0.02, 0.05, hz * 0.95)) };
+                pieces.push((bo, bh, dark(col, 0.9)));
+            }
+            P_CONE => {
+                pieces.push((vec3(0.0, -hy + 0.04, 0.0), vec3(0.2, 0.03, 0.2), dark(col, 0.8)));
+                pieces.push((vec3(0.0, -0.1, 0.0), vec3(0.14, 0.16, 0.14), col));
+                pieces.push((vec3(0.0, 0.1, 0.0), vec3(0.11, 0.05, 0.11), col2));
+                pieces.push((vec3(0.0, 0.24, 0.0), vec3(0.07, 0.1, 0.07), col));
+            }
+            P_BIN => {
+                pieces.push((vec3(0.0, -0.05, 0.0), vec3(hx * 0.9, hy * 0.85, hz * 0.9), col));
+                pieces.push((vec3(0.0, hy * 0.95, 0.0), vec3(hx * 1.05, 0.04, hz * 1.05), col2));
+                for _ in 0..6 {
+                    let off = vec3((self.rf() - 0.5) * 0.3, 0.1 + self.rf() * 0.3, (self.rf() - 0.5) * 0.3);
+                    let tc = Color::new(0.4 + self.rf() * 0.5, 0.4 + self.rf() * 0.5, 0.4 + self.rf() * 0.5, 1.0);
+                    pieces.push((off, vec3(0.05, 0.04, 0.05), tc));
+                }
+            }
+            _ => {
+                pieces.push((vec3(0.0, -hy * 0.5, 0.0), vec3(hx * 0.92, hy * 0.5, hz * 0.92), col));
+                pieces.push((vec3(0.0, hy * 0.5, 0.0), vec3(hx * 0.92, hy * 0.5, hz * 0.92), col));
+                pieces.push((vec3(0.0, 0.0, 0.0), vec3(hx * 1.0, 0.03, hz * 1.0), col2));
+                pieces.push((vec3(0.0, hy * 0.95, 0.0), vec3(hx * 0.7, 0.02, hz * 0.7), col2));
+            }
+        }
+        let strong = if kind == P_CONE { 1.6 } else { 1.0 };
+        for (off, half, pc) in pieces {
+            let kick = (2.5 + self.rf() * 3.5) * strong;
+            let v = dir * kick + vec3((self.rf() - 0.5) * 3.0, 2.0 + self.rf() * 3.0, (self.rf() - 0.5) * 3.0);
+            self.debris_piece(c + off, half, pc, v);
+        }
+        if self.debris.len() > 320 {
+            let n = self.debris.len() - 320;
+            self.debris.drain(0..n);
+        }
+        let (snd, v) = match kind {
+            P_BARREL | P_BIN => (Snd::Clang, 0.8),
+            P_CONE => (Snd::Impact, 0.6),
+            _ => (Snd::Smash, 0.9),
+        };
+        self.ev.push((snd, v));
+        self.burst(c, vec3(0.0, 1.0, 0.0) + dir * 0.3, 12, dark(col, 1.1), 3.5, 0.06);
+        self.burst(c, vec3(0.0, 0.6, 0.0), 6, Color::new(0.75, 0.72, 0.66, 1.0), 1.5, 0.14);
+    }
+
+    fn update_props(&mut self, dt: f32) {
+        let pp = vec2(self.x, self.z);
+        let vel = self.vel;
+        let sp = vel.length();
+        let dir = if sp > 0.1 { vec3(vel.x / sp, 0.0, vel.y / sp) } else { vec3(0.0, 0.0, 0.0) };
+        let mut knock: Vec<usize> = Vec::new();
+        for (i, p) in self.props.list.iter_mut().enumerate() {
+            p.shake = (p.shake - dt).max(0.0);
+            if !p.alive {
+                p.respawn -= dt;
+                if p.respawn <= 0.0 && vec2(p.x, p.z).distance(pp) > 6.0 {
+                    p.alive = true;
+                    p.hp = p.max_hp;
+                }
+                continue;
+            }
+            // walking or sliding into light props knocks them over
+            if !p.solid() && sp > 2.3 && self.y < p.y0 + p.hy * 2.0 {
+                let d = vec2(p.x, p.z).distance(pp);
+                if d < PR + p.hx.max(p.hz) + 0.05 {
+                    knock.push(i);
+                }
+            }
+        }
+        for i in knock {
+            self.break_prop(i, dir + vec3(0.0, 0.2, 0.0));
+        }
+    }
+
     fn shoot(&mut self, w: &World) {
         if self.fire_cd > 0.0 || self.reloading > 0.0 {
             return;
@@ -485,9 +741,19 @@ impl Game {
 
         let o = self.cam_pos(w);
         let d = self.aim_dir();
-        let (dist, hit) = self.raycast(w, o, d);
+        let (mut dist, mut hit) = self.raycast(w, o, d);
+        let mut prop: Option<usize> = None;
+        if let Some((pt, pi)) = self.raycast_prop(o, d, dist) {
+            if pt < dist {
+                dist = pt;
+                hit = None;
+                prop = Some(pi);
+            }
+        }
         let end = o + d * dist;
-        if let Some((i, head)) = hit {
+        if let Some(pi) = prop {
+            self.hit_prop(pi, d, end);
+        } else if let Some((i, head)) = hit {
             self.kill_target(i, d, head);
         } else if dist < MAX_DIST {
             let back = -d;
@@ -555,8 +821,8 @@ impl Game {
                     self.sliding = true;
                     self.slide_t = 0.0;
                     self.slide_dir = dir;
-                    self.slide_spd = SPRINT * 1.3;
-                    self.slide_dur = if i.slide_hold { 2.5 } else { 0.9 };
+                    self.slide_spd = self.vel.length().max(SPRINT) * 1.25;
+                    self.slide_dur = if i.slide_hold { 2.6 } else { 1.0 };
                     self.ev.push((Snd::Slide, 0.7));
                 }
             } else {
@@ -566,8 +832,15 @@ impl Game {
         }
         if self.sliding {
             self.slide_t += dt;
-            let fr = if i.slide_hold { 2.4 } else { 5.0 };
-            self.slide_spd -= (fr + self.slide_spd * 0.5) * dt;
+            // smooth exponential glide, with gentle steering toward the stick
+            let k = if i.slide_hold { 0.5 } else { 1.15 };
+            self.slide_spd = (self.slide_spd * (-k * dt).exp() - 0.8 * dt).max(0.0);
+            if mv.length() > 0.3 {
+                let wd = wish.normalize_or_zero();
+                if wd.dot(self.slide_dir) > -0.2 {
+                    self.slide_dir = (self.slide_dir + wd * dt * 2.2).normalize_or_zero();
+                }
+            }
             let released = i.slide_hold && !i.snk_held && self.slide_t > 0.2;
             // turning the camera away from the slide, or pushing the stick against it, cancels instantly
             let turned_back = self.slide_dir.dot(f) < 0.3;
@@ -738,6 +1011,7 @@ impl Game {
             self.range = if dist >= MAX_DIST { 0.0 } else { dist };
         }
 
+        self.update_props(dt);
         self.update_targets(w, dt);
         self.update_debris(w, dt);
         for p in &mut self.parts {
@@ -797,7 +1071,7 @@ impl Game {
             }
             // look ahead: turn away from walls, cars, trees, buildings
             let (c, sn) = (t.hd.cos(), t.hd.sin());
-            if w.height_at(t.x + c * 0.9, t.z + sn * 0.9) > 0.3 {
+            if hh(w, &self.props, t.x + c * 0.9, t.z + sn * 0.9) > 0.3 {
                 t.hd += PI * (0.55 + r2 * 0.9) * if r1 < 0.5 { 1.0 } else { -1.0 };
                 t.timer = 0.8 + r3;
                 t.idle = 0.0;
@@ -809,7 +1083,7 @@ impl Game {
             t.vz += (gz - t.vz) * (dt * 4.0).min(1.0);
             let nx = t.x + t.vx * dt;
             let nz = t.z + t.vz * dt;
-            if w.height_at(nx, nz) <= 0.3 {
+            if hh(w, &self.props, nx, nz) <= 0.3 {
                 t.x = nx;
                 t.z = nz;
             } else {
@@ -840,17 +1114,17 @@ impl Game {
             d.v.y -= 16.0 * dt;
             let nx = d.p.x + d.v.x * dt;
             let nz = d.p.z + d.v.z * dt;
-            let rad = d.half.max_element().max(0.03);
-            if w.height_at(nx, d.p.z) > d.p.y - rad * 0.5 {
+            let rad = (d.half.min_element() * 1.5).max(0.03);
+            if hh(w, &self.props, nx, d.p.z) > d.p.y - rad * 0.5 {
                 d.v.x = -d.v.x * 0.4;
             }
-            if w.height_at(d.p.x, nz) > d.p.y - rad * 0.5 {
+            if hh(w, &self.props, d.p.x, nz) > d.p.y - rad * 0.5 {
                 d.v.z = -d.v.z * 0.4;
             }
             d.p.x += d.v.x * dt;
             d.p.z += d.v.z * dt;
             d.p.y += d.v.y * dt;
-            let fl = w.height_at(d.p.x, d.p.z);
+            let fl = hh(w, &self.props, d.p.x, d.p.z);
             let fl = if fl > d.p.y + 0.6 { 0.0 } else { fl };
             if d.p.y - rad < fl {
                 d.p.y = fl + rad;

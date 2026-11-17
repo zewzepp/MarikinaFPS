@@ -142,6 +142,75 @@ pub fn draw_target(b: &mut Batch, tg: &Target) {
     b.clear_xform();
 }
 
+pub fn draw_prop(b: &mut Batch, p: &Prop, t: f32) {
+    let wob = if p.shake > 0.0 { (t * 70.0).sin() * p.shake * 0.05 } else { 0.0 };
+    let c = vec3(p.x + wob, p.y0 + p.hy, p.z - wob * 0.6);
+    let dark = |col: Color, k: f32| Color::new(col.r * k, col.g * k, col.b * k, 1.0);
+    match p.kind {
+        P_CRATE => {
+            b.aabb(c, vec3(p.hx, p.hy, p.hz), p.col);
+            // frame: corner posts + top/bottom bands, so it reads as a wooden crate
+            let post = dark(p.col2, 1.0);
+            for sx in [-1.0f32, 1.0] {
+                for sz in [-1.0f32, 1.0] {
+                    b.aabb(c + vec3(sx * (p.hx - 0.035), 0.0, sz * (p.hz - 0.035)), vec3(0.05, p.hy + 0.005, 0.05), post);
+                }
+            }
+            b.aabb(c + vec3(0.0, p.hy - 0.045, 0.0), vec3(p.hx + 0.008, 0.04, p.hz + 0.008), post);
+            b.aabb(c - vec3(0.0, p.hy - 0.045, 0.0), vec3(p.hx + 0.008, 0.04, p.hz + 0.008), post);
+            b.aabb(c, vec3(p.hx + 0.006, 0.035, p.hz + 0.006), dark(p.col, 0.8));
+        }
+        P_BENCH => {
+            let ax = p.along_x;
+            let m = |u: f32, v: f32| if ax { vec3(u, 0.0, v) } else { vec3(v, 0.0, u) };
+            let h = |lu: f32, hy: f32, lv: f32| if ax { vec3(lu, hy, lv) } else { vec3(lv, hy, lu) };
+            let base = vec3(c.x, p.y0, c.z);
+            let (len, wid) = if ax { (p.hx, p.hz) } else { (p.hz, p.hx) };
+            for s in [-1.0f32, 1.0] {
+                b.aabb(base + m(s * len * 0.82, 0.0) + vec3(0.0, 0.16, 0.0), h(0.04, 0.16, wid * 0.85), p.col2);
+            }
+            for k in 0..3 {
+                let o = (k as f32 - 1.0) * wid * 0.62;
+                b.aabb(base + m(0.0, o) + vec3(0.0, 0.33, 0.0), h(len, 0.03, wid * 0.27), dark(p.col, 0.85 + 0.08 * k as f32));
+            }
+            for k in 0..2 {
+                b.aabb(base + m(0.0, -wid * 0.9) + vec3(0.0, 0.50 + 0.1 * k as f32 + 0.04, 0.0), h(len, 0.035, 0.02), dark(p.col, 0.9));
+            }
+            for s in [-1.0f32, 1.0] {
+                b.aabb(base + m(s * len * 0.82, -wid * 0.9) + vec3(0.0, 0.45, 0.0), h(0.03, 0.2, 0.025), p.col2);
+            }
+        }
+        P_CONE => {
+            let base = vec3(c.x, p.y0, c.z);
+            b.aabb(base + vec3(0.0, 0.03, 0.0), vec3(0.2, 0.03, 0.2), dark(p.col, 0.75));
+            b.aabb(base + vec3(0.0, 0.2, 0.0), vec3(0.145, 0.14, 0.145), p.col);
+            b.aabb(base + vec3(0.0, 0.40, 0.0), vec3(0.108, 0.055, 0.108), p.col2);
+            b.aabb(base + vec3(0.0, 0.54, 0.0), vec3(0.075, 0.09, 0.075), p.col);
+        }
+        P_BIN => {
+            let base = vec3(c.x, p.y0, c.z);
+            b.aabb(base + vec3(0.0, p.hy * 0.9, 0.0), vec3(p.hx * 0.9, p.hy * 0.9, p.hz * 0.9), p.col);
+            b.aabb(base + vec3(0.0, p.hy * 0.5, 0.0), vec3(p.hx * 0.93, 0.03, p.hz * 0.93), p.col2);
+            b.aabb(base + vec3(0.0, p.hy * 1.85, 0.0), vec3(p.hx * 1.04, 0.045, p.hz * 1.04), p.col2);
+            b.aabb(base + vec3(0.0, p.hy * 2.0 - 0.01, 0.0), vec3(0.07, 0.03, 0.04), dark(p.col2, 0.7));
+        }
+        _ => {
+            let base = vec3(c.x, p.y0, c.z);
+            let a = p.hx * 0.93;
+            for yaw in [0.0f32, std::f32::consts::FRAC_PI_4] {
+                b.obox(base + vec3(0.0, p.hy, 0.0), yaw, a, p.hy, a, p.col);
+            }
+            for yy in [0.12f32, p.hy * 2.0 - 0.12] {
+                for yaw in [0.0f32, std::f32::consts::FRAC_PI_4] {
+                    b.obox(base + vec3(0.0, yy, 0.0), yaw, p.hx * 0.97, 0.03, p.hx * 0.97, p.col2);
+                }
+            }
+            b.obox(base + vec3(0.0, p.hy, 0.0), 0.0, p.hx * 0.96, 0.025, p.hx * 0.96, dark(p.col, 0.8));
+            b.obox(base + vec3(0.0, p.hy * 2.0 + 0.005, 0.0), 0.0, p.hx * 0.7, 0.012, p.hx * 0.7, p.col2);
+        }
+    }
+}
+
 pub fn draw_player(b: &mut Batch, g: &Game, w: &World) {
     let kb = if g.sneaking { 0.78 } else { 1.0 };
     let a = g.slide_a; // 0 = upright, 1 = fully in the slide pose
@@ -187,8 +256,11 @@ pub fn draw_player(b: &mut Batch, g: &Game, w: &World) {
     let (sl, cl) = lean.sin_cos();
     let dir_t = up * cl - f * sl; // along the spine
     let dd = f * cl + up * sl; // chest depth axis
-    let hip_h = 0.40 * kb * (1.0 - a) + 0.17 * a;
-    let hip = base + up * hip_h - f * (0.04 * a);
+    let run_ph = g.walk * 1.5;
+    let run_amt = if g.grounded && !g.sliding { ((g.moving - 0.9) / 0.6).clamp(0.0, 1.0) } else { 0.0 };
+    let run_bob = (run_ph * 2.0).cos().abs() * 0.022 * run_amt;
+    let hip_h = 0.40 * kb * (1.0 - a) + 0.17 * a + run_bob;
+    let hip = base + up * hip_h - f * (0.04 * a) + r * (run_ph.sin() * 0.012 * run_amt);
 
     // direction the legs point: toward the slide while sliding
     let sd = vec3(g.slide_dir.x, 0.0, g.slide_dir.y);
@@ -196,16 +268,24 @@ pub fn draw_player(b: &mut Batch, g: &Game, w: &World) {
     let fs = if fs.length() < 0.5 { f } else { fs };
     let yaw_s = fs.z.atan2(fs.x);
 
-    // legs (hip -> knee -> foot): stride swing when running, one leg out / one folded when sliding
-    let sw = (g.walk * 1.5).sin() * 0.15 * g.moving.min(1.2);
+    // legs (hip -> knee -> foot): walk / full sprint cycle with knee drive, one leg out / one folded when sliding
+    let ph = g.walk * 1.5;
+    let run = if g.grounded && !g.sliding { ((g.moving - 0.9) / 0.6).clamp(0.0, 1.0) } else { 0.0 };
+    let amp = (0.15 + 0.17 * run) * g.moving.min(1.0);
+    let sw = ph.sin() * amp;
     let tuck = if g.grounded { 0.0 } else { 0.10 };
+    let bob = (ph * 2.0).cos().abs() * 0.022 * run * (1.0 - a);
     for s in [-1.0f32, 1.0] {
-        let lift = if g.grounded { 0.0 } else { tuck * (if s > 0.0 { 1.0 } else { 0.3 }) };
+        let lift_air = if g.grounded { 0.0 } else { tuck * (if s > 0.0 { 1.0 } else { 0.3 }) };
+        // foot rises while the leg swings forward (recovery), plants while it drives back
+        let recover = (ph.cos() * s).max(0.0);
+        let lift_run = recover * (0.05 + 0.13 * run) * g.moving.min(1.0);
         let lat = r * (0.095 * s);
         // upright pose
-        let h0 = base + lat + up * (0.40 * kb);
-        let f0 = base + lat + f * (sw * s * (1.0 - a) + 0.03) + up * (0.05 + lift);
-        let k0 = (h0 + f0) * 0.5 + f * (0.02 + (sw * s).max(0.0) * 0.6);
+        let h0 = base + lat + up * (0.40 * kb + bob);
+        let f0 = base + lat + f * (sw * s * (1.0 - a) + 0.03) + up * (0.05 + lift_air + lift_run);
+        let drive = (sw * s).max(0.0);
+        let k0 = (h0 + f0) * 0.5 + f * (0.02 + drive * (0.6 + 1.2 * run) + recover * 0.05 * run);
         // slide pose
         let h1 = hip + lat;
         let (f1, k1) = if s > 0.0 {

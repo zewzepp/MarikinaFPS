@@ -1,4 +1,4 @@
-use macroquad::audio::{load_sound_from_bytes, play_sound, PlaySoundParams, Sound};
+use macroquad::audio::{load_sound_from_bytes, play_sound, set_sound_volume, PlaySoundParams, Sound};
 use std::f32::consts::TAU;
 
 const RATE: u32 = 22050;
@@ -157,6 +157,30 @@ fn impact() -> Vec<u8> {
     })
 }
 
+fn smash() -> Vec<u8> {
+    // wood crack + splintering clatter
+    let mut r = Rng(606);
+    let mut lp = 0.0f32;
+    gen(0.4, |t, _| {
+        let n = r.next();
+        lp += (n - lp) * 0.3;
+        let crack = n * env(t, 0.001, 70.0) * 0.9;
+        let body = lp * env(t, 0.002, 16.0) * 1.3;
+        let clatter = if ((t * 55.0) as i32 % 3) == 0 { n * env(t, 0.05, 9.0) * 0.5 } else { 0.0 };
+        let thud = (TAU * (120.0 * (-t * 10.0).exp() + 55.0) * t).sin() * env(t, 0.002, 12.0) * 0.8;
+        (crack + body + clatter + thud) * 0.7
+    })
+}
+
+fn clang() -> Vec<u8> {
+    // metal hit: inharmonic ringing partials
+    let mut r = Rng(707);
+    gen(0.6, |t, _| {
+        let ring = (TAU * 520.0 * t).sin() * 0.5 + (TAU * 1180.0 * t).sin() * 0.35 + (TAU * 1910.0 * t).sin() * 0.25 + (TAU * 2870.0 * t).sin() * 0.15;
+        (ring * env(t, 0.001, 9.0) + r.next() * env(t, 0.001, 90.0) * 0.6) * 0.55
+    })
+}
+
 fn scope() -> Vec<u8> {
     gen(0.12, |t, _| (TAU * (400.0 + 600.0 * t * 8.0) * t).sin() * env(t, 0.003, 30.0) * 0.4)
 }
@@ -188,6 +212,8 @@ pub struct Sfx {
     ding: Option<Sound>,
     impact: Option<Sound>,
     scope: Option<Sound>,
+    smash: Option<Sound>,
+    clang: Option<Sound>,
     ui: Option<Sound>,
     amb: Option<Sound>,
     pub master: f32,
@@ -207,6 +233,8 @@ pub enum Snd {
     Ding,
     Impact,
     Scope,
+    Smash,
+    Clang,
     Ui,
 }
 
@@ -227,13 +255,15 @@ impl Sfx {
             ding: ld(ding()).await,
             impact: ld(impact()).await,
             scope: ld(scope()).await,
+            smash: ld(smash()).await,
+            clang: ld(clang()).await,
             ui: ld(click(1500.0, 0.05, 0.5, 3)).await,
             amb: ld(ambient()).await,
             master: 1.0,
             loaded: 0,
         };
         let mut s = s;
-        s.loaded = [&s.shot, &s.empty, &s.reload, &s.step, &s.jump, &s.land, &s.slide, &s.hit, &s.ding, &s.impact, &s.scope, &s.ui, &s.amb]
+        s.loaded = [&s.shot, &s.empty, &s.reload, &s.step, &s.jump, &s.land, &s.slide, &s.hit, &s.ding, &s.impact, &s.scope, &s.smash, &s.clang, &s.ui, &s.amb]
             .iter()
             .filter(|x| x.is_some())
             .count();
@@ -241,6 +271,13 @@ impl Sfx {
             play_sound(a, PlaySoundParams { looped: true, volume: 0.25 * s.master });
         }
         s
+    }
+
+    pub fn set_master(&mut self, v: f32) {
+        self.master = v.clamp(0.0, 1.0);
+        if let Some(a) = &self.amb {
+            set_sound_volume(a, 0.25 * self.master);
+        }
     }
 
     pub fn play(&self, s: Snd, vol: f32) {
@@ -256,6 +293,8 @@ impl Sfx {
             Snd::Ding => &self.ding,
             Snd::Impact => &self.impact,
             Snd::Scope => &self.scope,
+            Snd::Smash => &self.smash,
+            Snd::Clang => &self.clang,
             Snd::Ui => &self.ui,
         };
         if let Some(snd) = snd {
