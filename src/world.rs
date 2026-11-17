@@ -5,12 +5,12 @@ use std::collections::HashMap;
 
 pub const ROAD: f32 = 8.0;
 pub const PERIOD: f32 = 32.0;
-pub const NB: usize = 6;
-pub const SIZE: f32 = NB as f32 * PERIOD + ROAD; // 200 x 200 units
+pub const NB: usize = 4;
+pub const SIZE: f32 = NB as f32 * PERIOD + ROAD; // 136 x 136 units
 pub const CURB: f32 = 0.12;
 const CH: f32 = 32.0;
 const GC: f32 = 8.0;
-const GN: usize = 25;
+const GN: usize = NB * 4 + 1;
 
 #[derive(Clone, Copy)]
 pub struct BoxC {

@@ -39,16 +39,53 @@ pub struct Target {
     pub vz: f32,
     pub x0: f32,
     pub z0: f32,
-    pub ax: bool,
-    pub dir: f32,
+    pub hd: f32,    // wander heading
+    pub timer: f32, // time until next random decision
+    pub idle: f32,  // standing still for this long
+    pub spd: f32,
     pub yaw: f32,
     pub alive: bool,
     pub respawn: f32,
     pub walk: f32,
+    // look
+    pub skin: Color,
+    pub hair: Color,
+    pub shirt: Color,
+    pub pants: Color,
+    pub shoes: Color,
+    pub accent: Color,
+    pub hair_style: u8, // 0 short, 1 long, 2 cap, 3 ponytail
+    pub short_sleeve: bool,
+    pub shorts: bool,
+    pub pack: bool,
+    pub bag: bool,
+}
+
+fn pick(list: &[[f32; 3]], r: f32) -> Color {
+    let c = list[((r * list.len() as f32) as usize).min(list.len() - 1)];
+    Color::new(c[0], c[1], c[2], 1.0)
 }
 
 impl Target {
-    fn new(x: f32, z: f32, ax: bool, k: usize) -> Self {
+    fn new(x: f32, z: f32, k: usize) -> Self {
+        use crate::tex::hash;
+        let h = |n: u32| hash(k as i32 * 7 + 3, n as i32, 4141 + n);
+        let skins = [[0.93, 0.74, 0.58], [0.84, 0.60, 0.40], [0.72, 0.50, 0.32], [0.58, 0.38, 0.24], [0.96, 0.80, 0.66]];
+        let hairs = [[0.07, 0.06, 0.06], [0.16, 0.10, 0.07], [0.30, 0.18, 0.10], [0.55, 0.55, 0.55], [0.40, 0.14, 0.08]];
+        let shirts = [
+            [0.78, 0.20, 0.17],
+            [0.20, 0.40, 0.78],
+            [0.92, 0.78, 0.20],
+            [0.22, 0.62, 0.34],
+            [0.93, 0.93, 0.90],
+            [0.92, 0.50, 0.15],
+            [0.50, 0.28, 0.70],
+            [0.15, 0.58, 0.60],
+            [0.90, 0.45, 0.60],
+            [0.45, 0.47, 0.50],
+        ];
+        let pants = [[0.20, 0.28, 0.46], [0.10, 0.10, 0.12], [0.58, 0.50, 0.36], [0.28, 0.29, 0.32], [0.30, 0.34, 0.20]];
+        let shoes = [[0.08, 0.08, 0.09], [0.38, 0.22, 0.12], [0.92, 0.92, 0.90], [0.70, 0.15, 0.12], [0.55, 0.36, 0.20]];
         Self {
             x,
             z,
@@ -56,12 +93,25 @@ impl Target {
             vz: 0.0,
             x0: x,
             z0: z,
-            ax,
-            dir: if k % 2 == 0 { 1.0 } else { -1.0 },
-            yaw: 0.0,
+            hd: h(1) * TAU,
+            timer: h(2) * 2.0,
+            idle: 0.0,
+            spd: 0.9 + h(3) * 0.9,
+            yaw: h(1) * TAU,
             alive: true,
             respawn: 0.0,
-            walk: k as f32,
+            walk: h(4) * 20.0,
+            skin: pick(&skins, h(5)),
+            hair: pick(&hairs, h(6)),
+            shirt: pick(&shirts, h(7)),
+            pants: pick(&pants, h(8)),
+            shoes: pick(&shoes, h(9)),
+            accent: pick(&shirts, h(10)),
+            hair_style: (h(11) * 3.999) as u8,
+            short_sleeve: h(12) > 0.4,
+            shorts: h(13) > 0.78,
+            pack: h(14) > 0.7,
+            bag: h(15) > 0.8,
         }
     }
 }
@@ -116,6 +166,7 @@ pub struct Game {
     pub slide_cd: f32,
     pub slide_dir: Vec2,
     pub slide_spd: f32,
+    pub slide_a: f32,
     pub walk: f32,
     pub moving: f32,
     pub step_acc: f32,
@@ -155,7 +206,7 @@ fn samples(x: f32, z: f32) -> [(f32, f32); 9] {
 
 impl Game {
     pub fn new(w: &World) -> Self {
-        let targets = w.spawns.iter().enumerate().map(|(k, s)| Target::new(s.0, s.1, s.2, k)).collect();
+        let targets = w.spawns.iter().enumerate().map(|(k, s)| Target::new(s.0, s.1, k)).collect();
         Self {
             x: SIZE * 0.5,
             y: 0.0,
@@ -184,6 +235,7 @@ impl Game {
             slide_cd: 0.0,
             slide_dir: Vec2::ZERO,
             slide_spd: 0.0,
+            slide_a: 0.0,
             walk: 0.0,
             moving: 0.0,
             step_acc: 0.0,
@@ -355,28 +407,35 @@ impl Game {
 
     fn kill_target(&mut self, i: usize, dir: Vec3, head: bool) {
         let (tx, tz, yaw) = (self.targets[i].x, self.targets[i].z, self.targets[i].yaw);
+        let (skin, hair, shirt, pants, shoes) = {
+            let t = &self.targets[i];
+            (t.skin, t.hair, t.shirt, t.pants, t.shoes)
+        };
+        let sleeve = if self.targets[i].short_sleeve { skin } else { shirt };
+        let leg2 = if self.targets[i].shorts { skin } else { pants };
         self.targets[i].alive = false;
         self.targets[i].respawn = 6.0;
         let r = vec3(-yaw.sin(), 0.0, yaw.cos());
         let f = vec3(yaw.cos(), 0.0, yaw.sin());
-        let red = Color::new(0.72, 0.18, 0.15, 1.0);
-        let dred = Color::new(0.45, 0.10, 0.09, 1.0);
-        let skin = Color::new(0.88, 0.62, 0.38, 1.0);
-        let dark = Color::new(0.14, 0.15, 0.18, 1.0);
-        let pieces: [(Vec3, Vec3, Color); 7] = [
-            (r * 0.13 + vec3(0.0, 0.42, 0.0), vec3(0.10, 0.42, 0.10), dark),
-            (r * -0.13 + vec3(0.0, 0.42, 0.0), vec3(0.10, 0.42, 0.10), dark),
-            (vec3(0.0, 1.05, 0.0), vec3(0.20, 0.32, 0.30), red),
-            (vec3(0.0, 1.55, 0.0), vec3(0.14, 0.14, 0.14), skin),
-            (vec3(0.0, 1.70, 0.0), vec3(0.17, 0.07, 0.17), dred),
-            (r * 0.42 + vec3(0.0, 1.05, 0.0), vec3(0.08, 0.28, 0.08), dred),
-            (r * -0.42 + vec3(0.0, 1.05, 0.0), vec3(0.08, 0.28, 0.08), dred),
+        // (offset, half extents, colour) in world units around the body
+        let pieces: [(Vec3, Vec3, Color); 11] = [
+            (r * 0.10 + vec3(0.0, 0.62, 0.0), vec3(0.09, 0.22, 0.09), pants),
+            (r * -0.10 + vec3(0.0, 0.62, 0.0), vec3(0.09, 0.22, 0.09), pants),
+            (r * 0.10 + vec3(0.0, 0.16, 0.0), vec3(0.10, 0.14, 0.09), leg2),
+            (r * -0.10 + vec3(0.0, 0.16, 0.0), vec3(0.10, 0.14, 0.09), leg2),
+            (vec3(0.0, 1.05, 0.0), vec3(0.14, 0.32, 0.29), shirt),
+            (vec3(0.0, 1.50, 0.0), vec3(0.14, 0.14, 0.14), skin),
+            (vec3(0.0, 1.66, 0.0), vec3(0.16, 0.06, 0.16), hair),
+            (r * 0.40 + vec3(0.0, 1.08, 0.0), vec3(0.08, 0.28, 0.08), sleeve),
+            (r * -0.40 + vec3(0.0, 1.08, 0.0), vec3(0.08, 0.28, 0.08), sleeve),
+            (r * 0.10 + f * 0.04 + vec3(0.0, 0.05, 0.0), vec3(0.14, 0.06, 0.09), shoes),
+            (r * -0.10 + f * 0.04 + vec3(0.0, 0.05, 0.0), vec3(0.14, 0.06, 0.09), shoes),
         ];
         let vx = self.targets[i].vx;
         let vz = self.targets[i].vz;
         for (off, half, col) in pieces {
             let kick = 3.5 + self.rf() * 4.0;
-            let v = dir * kick + vec3(vx, 2.0 + self.rf() * 3.0, vz) + (r * (self.rf() - 0.5) + f * (self.rf() - 0.5)) * 2.0;
+            let v = dir * kick + vec3(vx, 2.0 + self.rf() * 3.0, vz) + (r * (self.rf() - 0.5) + f * (self.rf() - 0.5)) * 2.5;
             let w = vec3(self.rf() - 0.5, self.rf() - 0.5, self.rf() - 0.5) * 16.0;
             self.debris.push(Debris {
                 p: vec3(tx, 0.0, tz) + off,
@@ -390,8 +449,8 @@ impl Game {
                 bounces: 0,
             });
         }
-        if self.debris.len() > 220 {
-            let n = self.debris.len() - 220;
+        if self.debris.len() > 260 {
+            let n = self.debris.len() - 260;
             self.debris.drain(0..n);
         }
         self.kills += 1;
@@ -492,7 +551,7 @@ impl Game {
             if slide_label {
                 let dir = wish.normalize_or_zero();
                 // sliding backward is not allowed: only forward-ish directions
-                if self.grounded && !self.sliding && self.slide_cd <= 0.0 && forward_ok && dir.dot(f) > 0.35 {
+                if self.grounded && !self.sliding && self.slide_cd <= 0.0 && forward_ok && dir.dot(f) > 0.55 {
                     self.sliding = true;
                     self.slide_t = 0.0;
                     self.slide_dir = dir;
@@ -510,8 +569,15 @@ impl Game {
             let fr = if i.slide_hold { 2.4 } else { 5.0 };
             self.slide_spd -= (fr + self.slide_spd * 0.5) * dt;
             let released = i.slide_hold && !i.snk_held && self.slide_t > 0.2;
-            let turned_back = self.slide_dir.dot(f) < -0.2;
-            if self.slide_t >= self.slide_dur || self.slide_spd < 2.3 || released || i.jump || turned_back {
+            // turning the camera away from the slide, or pushing the stick against it, cancels instantly
+            let turned_back = self.slide_dir.dot(f) < 0.3;
+            let pulled_back = mv.length() > 0.3 && wish.normalize_or_zero().dot(self.slide_dir) < -0.2;
+            if self.slide_t >= self.slide_dur || self.slide_spd < 2.3 || released || i.jump || turned_back || pulled_back {
+                if turned_back || pulled_back {
+                    self.vel = self.slide_dir * self.slide_spd * 0.35; // drop out of the slide, don't keep gliding
+                } else {
+                    self.vel = self.slide_dir * self.slide_spd;
+                }
                 self.sliding = false;
                 self.slide_cd = 0.4;
             }
@@ -644,6 +710,15 @@ impl Game {
         }
         let zoom_goal = if self.scoped { 1.0 } else { 0.0 };
         self.zoom += (zoom_goal - self.zoom) * (dt * 10.0).min(1.0);
+        let sa_goal = if self.sliding { 1.0 } else { 0.0 };
+        self.slide_a += (sa_goal - self.slide_a) * (dt * 11.0).min(1.0);
+        if self.sliding && self.slide_spd > 2.5 {
+            let back = vec3(-self.slide_dir.x, 0.35, -self.slide_dir.y);
+            let p = vec3(self.x, self.y + 0.08, self.z);
+            if self.rf() < 0.7 {
+                self.burst(p, back, 1, Color::new(0.72, 0.70, 0.64, 1.0), 1.4, 0.12);
+            }
+        }
         let boost_goal = if self.sprint || self.sliding { 1.0 } else { 0.0 };
         self.boost += (boost_goal - self.boost) * (dt * 8.0).min(1.0);
 
@@ -674,7 +749,10 @@ impl Game {
     }
 
     fn update_targets(&mut self, w: &World, dt: f32) {
-        for t in &mut self.targets {
+        use std::f32::consts::PI;
+        for i in 0..self.targets.len() {
+            let (r1, r2, r3) = (self.rf(), self.rf(), self.rf());
+            let t = &mut self.targets[i];
             if !t.alive {
                 t.respawn -= dt;
                 if t.respawn <= 0.0 {
@@ -683,33 +761,75 @@ impl Game {
                     t.z = t.z0;
                     t.vx = 0.0;
                     t.vz = 0.0;
+                    t.hd = r1 * TAU;
+                    t.timer = 0.5 + r2;
+                    t.idle = 0.0;
                 }
                 continue;
             }
-            let (ux, uz) = if t.ax { (1.0, 0.0) } else { (0.0, 1.0) };
-            let off = (t.x - t.x0) * ux + (t.z - t.z0) * uz;
-            if off * t.dir > 4.0 {
-                t.dir = -t.dir;
+            // random decisions: stand around, wander off in a new direction, change pace
+            t.timer -= dt;
+            if t.idle > 0.0 {
+                t.idle -= dt;
             }
-            if w.height_at(t.x + ux * t.dir * 0.8, t.z + uz * t.dir * 0.8) > 0.3 {
-                t.dir = -t.dir;
+            if t.timer <= 0.0 {
+                if r1 < 0.22 {
+                    t.idle = 0.8 + r2 * 2.2;
+                    t.timer = t.idle + 0.2;
+                } else {
+                    t.hd += (r2 - 0.5) * 2.6;
+                    t.spd = if r3 < 0.18 { 2.4 + r2 * 0.8 } else { 0.8 + r3 * 0.9 };
+                    t.timer = 1.2 + r3 * 3.5;
+                }
             }
-            let gx = ux * t.dir * 1.3;
-            let gz = uz * t.dir * 1.3;
+            // do not drift too far from home: curve back
+            let hx = t.x0 - t.x;
+            let hz = t.z0 - t.z;
+            if hx * hx + hz * hz > 26.0 * 26.0 {
+                let mut dh = hz.atan2(hx) - t.hd;
+                while dh > PI {
+                    dh -= TAU;
+                }
+                while dh < -PI {
+                    dh += TAU;
+                }
+                t.hd += dh * (dt * 2.0).min(1.0);
+            }
+            // look ahead: turn away from walls, cars, trees, buildings
+            let (c, sn) = (t.hd.cos(), t.hd.sin());
+            if w.height_at(t.x + c * 0.9, t.z + sn * 0.9) > 0.3 {
+                t.hd += PI * (0.55 + r2 * 0.9) * if r1 < 0.5 { 1.0 } else { -1.0 };
+                t.timer = 0.8 + r3;
+                t.idle = 0.0;
+            }
+            let go = if t.idle > 0.0 { 0.0 } else { t.spd };
+            let gx = t.hd.cos() * go;
+            let gz = t.hd.sin() * go;
             t.vx += (gx - t.vx) * (dt * 4.0).min(1.0);
             t.vz += (gz - t.vz) * (dt * 4.0).min(1.0);
-            t.x += t.vx * dt;
-            t.z += t.vz * dt;
-            t.walk += (t.vx.abs() + t.vz.abs()) * dt * 2.4;
-            let want = t.vz.atan2(t.vx);
-            let mut dy = want - t.yaw;
-            while dy > std::f32::consts::PI {
-                dy -= TAU;
+            let nx = t.x + t.vx * dt;
+            let nz = t.z + t.vz * dt;
+            if w.height_at(nx, nz) <= 0.3 {
+                t.x = nx;
+                t.z = nz;
+            } else {
+                t.vx = 0.0;
+                t.vz = 0.0;
+                t.hd += PI * 0.7;
             }
-            while dy < -std::f32::consts::PI {
-                dy += TAU;
+            let sp = (t.vx * t.vx + t.vz * t.vz).sqrt();
+            t.walk += sp * dt * 2.6;
+            if sp > 0.25 {
+                let want = t.vz.atan2(t.vx);
+                let mut dy = want - t.yaw;
+                while dy > PI {
+                    dy -= TAU;
+                }
+                while dy < -PI {
+                    dy += TAU;
+                }
+                t.yaw += dy * (dt * 6.0).min(1.0);
             }
-            t.yaw += dy * (dt * 6.0).min(1.0);
         }
     }
 

@@ -11,36 +11,140 @@ pub fn draw_target(b: &mut Batch, tg: &Target) {
     let up = vec3(0.0, 1.0, 0.0);
     let f = vec3(yaw.cos(), 0.0, yaw.sin());
     let r = vec3(-yaw.sin(), 0.0, yaw.cos());
-    let red = Color::new(0.72, 0.18, 0.15, 1.0);
-    let dark_red = Color::new(0.45, 0.10, 0.09, 1.0);
-    let white = Color::new(0.95, 0.95, 0.92, 1.0);
-    let pants = Color::new(0.14, 0.15, 0.18, 1.0);
-    let skin = Color::new(0.88, 0.62, 0.38, 1.0);
-    let sw = (tg.walk * 1.5).sin() * 0.13;
+    let spd = (tg.vx * tg.vx + tg.vz * tg.vz).sqrt();
+    let amp = (spd / 1.2).min(1.6);
+    let ph = tg.walk * 1.5;
+    let sw = ph.sin() * 0.15 * amp;
+    let bob = (ph * 2.0).cos().abs() * 0.012 * amp;
+    let dark = |c: Color, k: f32| Color::new(c.r * k, c.g * k, c.b * k, 1.0);
+    let sole = Color::new(0.06, 0.06, 0.07, 1.0);
+    let white = Color::new(0.97, 0.97, 0.97, 1.0);
+    let ink = Color::new(0.05, 0.05, 0.07, 1.0);
 
+    // legs: hip -> knee -> ankle, knee bends forward on the forward swing
+    let hip_y = 0.40 + bob * 0.5;
     for s in [-1.0f32, 1.0] {
-        let off = r * (0.07 * s) + f * (sw * s);
-        b.obox(p + off + up * 0.19, yaw, 0.055, 0.19, 0.055, pants);
-        b.obox(p + off + up * 0.03 + f * 0.03, yaw, 0.08, 0.03, 0.06, Color::new(0.07, 0.07, 0.08, 1.0));
+        let swing = sw * s;
+        let lift = (swing.max(0.0)) * 0.55;
+        let hip = p + r * (0.075 * s) + up * hip_y;
+        let foot = p + r * (0.08 * s) + f * swing + up * (0.045 + lift);
+        let knee = (hip + foot) * 0.5 + f * (0.02 + swing.max(0.0) * 0.5);
+        let shin_c = if tg.shorts { tg.skin } else { tg.pants };
+        b.limb(hip, knee, 0.052, tg.pants);
+        b.limb(knee, foot + up * 0.03, 0.045, shin_c);
+        // shoe: sole + upper + toe cap
+        let fc = foot + f * 0.035;
+        b.obox(fc + up * 0.012, yaw, 0.085, 0.014, 0.055, sole);
+        b.obox(fc + up * 0.04, yaw, 0.075, 0.030, 0.052, tg.shoes);
+        b.obox(fc + f * 0.05 + up * 0.035, yaw, 0.03, 0.025, 0.05, dark(tg.shoes, 0.8));
     }
-    b.obox(p + up * 0.52, yaw, 0.11, 0.20, 0.20, red);
-    b.obox(p + up * 0.34, yaw, 0.115, 0.025, 0.205, Color::new(0.10, 0.10, 0.12, 1.0));
-    let c = p + up * 0.54;
-    b.obox(c + f * 0.112, yaw, 0.004, 0.14, 0.14, white);
-    b.obox(c + f * 0.116, yaw, 0.004, 0.10, 0.10, dark_red);
-    b.obox(c + f * 0.120, yaw, 0.004, 0.06, 0.06, white);
-    b.obox(c + f * 0.124, yaw, 0.004, 0.025, 0.025, dark_red);
+
+    // pelvis + belt
+    b.obox(p + up * (hip_y + 0.01), yaw, 0.088, 0.045, 0.165, tg.pants);
+    b.obox(p + up * (hip_y + 0.05), yaw, 0.092, 0.012, 0.168, dark(tg.pants, 0.55));
+
+    // torso with collar, hem stripe and pocket
+    let ty = hip_y + 0.18 + bob;
+    b.obox(p + up * (ty + 0.04), yaw, 0.083, 0.19, 0.17, tg.shirt);
+    b.obox(p + up * (ty - 0.15), yaw, 0.087, 0.018, 0.172, dark(tg.shirt, 0.82));
+    b.obox(p + up * (ty + 0.215) + f * 0.01, yaw, 0.07, 0.014, 0.10, dark(tg.shirt, 0.75));
+    b.obox(p + up * (ty + 0.10) + f * 0.085 + r * 0.075, yaw, 0.004, 0.035, 0.035, dark(tg.shirt, 0.85));
+    // shoulders
     for s in [-1.0f32, 1.0] {
-        b.obox(p + r * (0.25 * s) + up * 0.50 + f * (-sw * s * 0.8), yaw, 0.05, 0.16, 0.05, dark_red);
+        b.obox(p + up * (ty + 0.20) + r * (0.185 * s), yaw, 0.058, 0.032, 0.045, tg.shirt);
     }
-    b.obox(p + up * 0.83, yaw, 0.085, 0.085, 0.085, skin);
-    b.obox(p + up * 0.90, yaw, 0.10, 0.045, 0.10, dark_red);
-    b.obox(p + up * 0.83 + f * 0.088, yaw, 0.01, 0.025, 0.07, Color::new(0.08, 0.09, 0.12, 1.0));
+
+    // backpack
+    if tg.pack {
+        b.obox(p + up * (ty + 0.04) - f * 0.14, yaw, 0.055, 0.15, 0.12, tg.accent);
+        b.obox(p + up * (ty - 0.02) - f * 0.19, yaw, 0.012, 0.07, 0.09, dark(tg.accent, 0.8));
+        for s in [-1.0f32, 1.0] {
+            b.obox(p + up * (ty + 0.08) + r * (0.075 * s), yaw, 0.09, 0.14, 0.012, dark(tg.accent, 0.7));
+        }
+    }
+
+    // arms: shoulder -> elbow -> hand, swinging opposite to the legs
+    for (k, s) in [-1.0f32, 1.0].iter().enumerate() {
+        let s = *s;
+        let swing = -sw * s * 1.1;
+        let sh = p + up * (ty + 0.19) + r * (0.205 * s);
+        let carry = tg.bag && k == 1;
+        let hand = if carry {
+            sh + r * 0.03 * s + f * 0.05 - up * 0.30
+        } else {
+            sh + r * 0.02 * s + f * swing - up * (0.30 - swing.abs() * 0.1)
+        };
+        let elbow = sh + (hand - sh) * 0.5 + f * (0.015 + swing.max(0.0) * 0.5) + r * 0.012 * s;
+        let upper_c = tg.shirt;
+        let lower_c = if tg.short_sleeve { tg.skin } else { tg.shirt };
+        b.limb(sh, elbow, 0.040, upper_c);
+        b.limb(elbow, hand, 0.036, lower_c);
+        b.obox(hand - up * 0.025, yaw, 0.03, 0.03, 0.026, tg.skin);
+        if carry {
+            let bc = hand - up * 0.11;
+            b.obox(bc, yaw, 0.035, 0.07, 0.055, tg.accent);
+            b.obox(bc + up * 0.075, yaw, 0.037, 0.008, 0.057, dark(tg.accent, 0.75));
+        }
+    }
+
+    // neck + head
+    let hy = ty + 0.34 + bob;
+    b.obox(p + up * (hy - 0.095), yaw, 0.032, 0.03, 0.032, dark(tg.skin, 0.92));
+    let head = p + up * hy;
+    b.obox(head, yaw, 0.082, 0.088, 0.078, tg.skin);
+    // ears
+    for s in [-1.0f32, 1.0] {
+        b.obox(head + r * (0.082 * s) - f * 0.005, yaw, 0.014, 0.024, 0.008, dark(tg.skin, 0.93));
+    }
+    // face: eyes (white + pupil), brows, nose, mouth
+    for s in [-1.0f32, 1.0] {
+        let e = head + f * 0.080 + r * (0.036 * s) + up * 0.012;
+        b.obox(e, yaw, 0.004, 0.015, 0.020, white);
+        b.obox(e + f * 0.003 + r * (0.003 * s), yaw, 0.003, 0.012, 0.011, ink);
+        b.obox(e + up * 0.03 + f * 0.003, yaw, 0.003, 0.005, 0.024, dark(tg.hair, 0.9));
+    }
+    b.obox(head + f * 0.085 - up * 0.010, yaw, 0.010, 0.016, 0.010, dark(tg.skin, 0.88));
+    b.obox(head + f * 0.080 - up * 0.050, yaw, 0.004, 0.007, 0.026, Color::new(0.55, 0.22, 0.22, 1.0));
+
+    // hair / cap
+    match tg.hair_style {
+        0 => {
+            b.obox(head + up * 0.075, yaw, 0.088, 0.030, 0.084, tg.hair);
+            b.obox(head - f * 0.07 + up * 0.01, yaw, 0.020, 0.075, 0.084, tg.hair);
+            b.obox(head + f * 0.085 + up * 0.055, yaw, 0.008, 0.022, 0.078, tg.hair);
+            for s in [-1.0f32, 1.0] {
+                b.obox(head + r * (0.080 * s) + up * 0.035, yaw, 0.07, 0.04, 0.008, tg.hair);
+            }
+        }
+        1 => {
+            b.obox(head + up * 0.078, yaw, 0.090, 0.030, 0.086, tg.hair);
+            b.obox(head - f * 0.075 - up * 0.05, yaw, 0.022, 0.135, 0.090, tg.hair);
+            b.obox(head + f * 0.087 + up * 0.060, yaw, 0.008, 0.020, 0.080, tg.hair);
+            for s in [-1.0f32, 1.0] {
+                b.obox(head + r * (0.084 * s) - up * 0.02 - f * 0.01, yaw, 0.07, 0.09, 0.008, tg.hair);
+            }
+        }
+        2 => {
+            let cap = tg.accent;
+            b.obox(head + up * 0.075, yaw, 0.092, 0.036, 0.090, cap);
+            b.obox(head + f * 0.125 + up * 0.050, yaw, 0.050, 0.006, 0.075, dark(cap, 0.8));
+            b.obox(head - f * 0.07 + up * 0.005, yaw, 0.020, 0.040, 0.082, tg.hair);
+        }
+        _ => {
+            b.obox(head + up * 0.075, yaw, 0.088, 0.030, 0.084, tg.hair);
+            b.obox(head - f * 0.07 + up * 0.02, yaw, 0.020, 0.065, 0.084, tg.hair);
+            let tail = (ph * 1.0).sin() * 0.05 * amp;
+            let root = head - f * 0.095 + up * 0.04;
+            b.limb(root, root - f * 0.05 - up * 0.17 + r * tail, 0.025, tg.hair);
+            b.obox(root - f * 0.01, yaw, 0.014, 0.014, 0.014, tg.accent);
+        }
+    }
     b.clear_xform();
 }
 
 pub fn draw_player(b: &mut Batch, g: &Game, w: &World) {
-    let k = g.k();
+    let kb = if g.sneaking { 0.78 } else { 1.0 };
+    let a = g.slide_a; // 0 = upright, 1 = fully in the slide pose
     let yaw = g.yaw;
     let base = g.feet();
     b.set_xform(base, S);
@@ -65,49 +169,84 @@ pub fn draw_player(b: &mut Batch, g: &Game, w: &World) {
     let gun_mid = Color::new(0.30, 0.32, 0.35, 1.0);
     let gun_wood = Color::new(0.35, 0.24, 0.14, 1.0);
 
-    // soft shadow
+    // soft shadow (stretches along the slide)
     let sy = base.y + (g.ground_here(w) - g.y + 0.03) / S;
+    let sx = 0.3 + 0.25 * a;
     b.quad(
         [
-            vec3(g.x - 0.3, sy, g.z + 0.3),
-            vec3(g.x + 0.3, sy, g.z + 0.3),
-            vec3(g.x + 0.3, sy, g.z - 0.3),
-            vec3(g.x - 0.3, sy, g.z - 0.3),
+            vec3(g.x - sx, sy, g.z + 0.3),
+            vec3(g.x + sx, sy, g.z + 0.3),
+            vec3(g.x + sx, sy, g.z - 0.3),
+            vec3(g.x - sx, sy, g.z - 0.3),
         ],
         Color::new(0.0, 0.0, 0.0, 0.35),
     );
 
-    // legs: swing with stride, tuck when airborne
-    let mut sw = (g.walk * 1.5).sin() * 0.15 * g.moving.min(1.2);
+    // body lean: back while sliding, slightly forward while sprinting
+    let lean = a * 1.05 - g.boost * (1.0 - a) * 0.10;
+    let (sl, cl) = lean.sin_cos();
+    let dir_t = up * cl - f * sl; // along the spine
+    let dd = f * cl + up * sl; // chest depth axis
+    let hip_h = 0.40 * kb * (1.0 - a) + 0.17 * a;
+    let hip = base + up * hip_h - f * (0.04 * a);
+
+    // direction the legs point: toward the slide while sliding
+    let sd = vec3(g.slide_dir.x, 0.0, g.slide_dir.y);
+    let fs = (f * (1.0 - a) + sd * a).normalize_or_zero();
+    let fs = if fs.length() < 0.5 { f } else { fs };
+    let yaw_s = fs.z.atan2(fs.x);
+
+    // legs (hip -> knee -> foot): stride swing when running, one leg out / one folded when sliding
+    let sw = (g.walk * 1.5).sin() * 0.15 * g.moving.min(1.2);
     let tuck = if g.grounded { 0.0 } else { 0.10 };
-    if g.sliding {
-        sw = 0.0;
-    }
-    let leg_top = 0.40 * k;
-    let ch = (leg_top - 0.10) * 0.5;
     for s in [-1.0f32, 1.0] {
         let lift = if g.grounded { 0.0 } else { tuck * (if s > 0.0 { 1.0 } else { 0.3 }) };
-        let off = r * (0.095 * s) + f * (sw * s + if g.sliding { 0.12 * s.max(0.0) } else { 0.0 });
-        b.obox(base + off + up * (0.05 + lift) + f * 0.03, yaw, 0.10, 0.05, 0.07, boot);
-        b.obox(base + off + up * (0.10 + ch + lift), yaw, 0.065, ch, 0.07, pants);
+        let lat = r * (0.095 * s);
+        // upright pose
+        let h0 = base + lat + up * (0.40 * kb);
+        let f0 = base + lat + f * (sw * s * (1.0 - a) + 0.03) + up * (0.05 + lift);
+        let k0 = (h0 + f0) * 0.5 + f * (0.02 + (sw * s).max(0.0) * 0.6);
+        // slide pose
+        let h1 = hip + lat;
+        let (f1, k1) = if s > 0.0 {
+            let ft = base + lat + fs * 0.30 + up * 0.07;
+            (ft, (h1 + ft) * 0.5 + up * 0.015)
+        } else {
+            let kn = h1 + fs * 0.12 + up * 0.14;
+            (kn - fs * 0.05 - up * 0.15 + lat * 0.2, kn)
+        };
+        let hp = h0 + (h1 - h0) * a;
+        let fp = f0 + (f1 - f0) * a;
+        let kp = k0 + (k1 - k0) * a;
+        let bya = if a > 0.5 { yaw_s } else { yaw };
+        b.limb(hp, kp, 0.062, pants);
+        b.limb(kp, fp + up * 0.04, 0.058, pants);
+        b.obox(fp + fs * (0.02 * a) + f * (0.02 * (1.0 - a)), bya, 0.10, 0.05, 0.07, boot);
+        b.obox(fp + up * 0.012 + f * (0.04 * (1.0 - a)) + fs * (0.04 * a), bya, 0.045, 0.02, 0.06, Color::new(0.16, 0.16, 0.18, 1.0));
     }
 
-    b.obox(base + up * leg_top, yaw, 0.115, 0.025, 0.20, belt);
-    b.obox(base + up * leg_top + r * 0.19 + f * 0.03, yaw, 0.04, 0.035, 0.04, pack);
-    b.obox(base + up * leg_top - r * 0.19 + f * 0.03, yaw, 0.04, 0.035, 0.04, pack);
+    // belt + pouches, torso, vest, patch, pack
+    b.boxed(hip, dd * 0.115, dir_t * 0.025, r * 0.20, belt);
+    b.boxed(hip + r * 0.19 + dd * 0.03, dd * 0.04, dir_t * 0.035, r * 0.04, pack);
+    b.boxed(hip - r * 0.19 + dd * 0.03, dd * 0.04, dir_t * 0.035, r * 0.04, pack);
 
-    b.obox(base + up * (0.59 * k), yaw, 0.10, 0.19 * k, 0.19, shirt);
-    b.obox(base + up * (0.60 * k) + f * 0.05, yaw, 0.06, 0.15 * k, 0.17, vest);
-    b.obox(base + up * (0.60 * k) - f * 0.07, yaw, 0.04, 0.15 * k, 0.16, vest);
-    b.obox(base + up * (0.66 * k) + f * 0.112, yaw, 0.012, 0.035 * k, 0.07, patch);
-    b.obox(base + up * (0.62 * k) - f * 0.17, yaw, 0.06, 0.14 * k, 0.13, pack);
+    let tc = hip + dir_t * (0.19 * kb);
+    b.boxed(tc, dd * 0.10, dir_t * (0.19 * kb), r * 0.19, shirt);
+    b.boxed(tc + dd * 0.05 + dir_t * (0.01 * kb), dd * 0.06, dir_t * (0.15 * kb), r * 0.17, vest);
+    b.boxed(tc - dd * 0.07 + dir_t * (0.01 * kb), dd * 0.04, dir_t * (0.15 * kb), r * 0.16, vest);
+    b.boxed(tc + dd * 0.112 + dir_t * (0.07 * kb), dd * 0.012, dir_t * (0.035 * kb), r * 0.07, patch);
+    b.boxed(tc - dd * 0.17 + dir_t * (0.02 * kb), dd * 0.06, dir_t * (0.14 * kb), r * 0.13, pack);
 
-    b.obox(base + up * (0.80 * k), yaw, 0.04, 0.025, 0.04, skin);
-    let hy = 0.93 * k;
-    b.obox(base + up * hy, yaw, 0.085, 0.09, 0.085, skin);
-    b.obox(base + up * (hy + 0.05), yaw, 0.095, 0.05, 0.095, helmet);
-    b.obox(base + up * (hy + 0.14), yaw, 0.02, 0.012, 0.05, Color::new(0.20, 0.28, 0.24, 1.0));
-    b.obox(base + up * hy + f * 0.088, yaw, 0.01, 0.03, 0.075, visor);
+    // neck + head (head stays more upright than the chest)
+    let neck = hip + dir_t * (0.40 * kb);
+    b.boxed(neck, dd * 0.04, dir_t * 0.03, r * 0.04, skin);
+    let hl = lean * 0.45;
+    let dir_h = up * hl.cos() - f * hl.sin();
+    let head = hip + dir_h * (0.53 * kb);
+    b.obox(head, yaw, 0.085, 0.09, 0.085, skin);
+    b.obox(head + up * 0.05, yaw, 0.095, 0.05, 0.095, helmet);
+    b.obox(head + up * 0.14, yaw, 0.02, 0.012, 0.05, Color::new(0.20, 0.28, 0.24, 1.0));
+    b.obox(head + f * 0.088, yaw, 0.01, 0.03, 0.075, visor);
 
     let gc = g.gun_model();
     b.boxed(gc, d * 0.17, u2 * 0.035, r * 0.03, gun_dark);
@@ -117,8 +256,8 @@ pub fn draw_player(b: &mut Batch, g: &Game, w: &World) {
     b.boxed(gc + d * 0.03 - u2 * 0.075, d * 0.02, u2 * 0.05, r * 0.02, gun_dark);
     b.boxed(gc + u2 * 0.05 + d * 0.04, d * 0.05, u2 * 0.015, r * 0.012, gun_dark);
 
-    let sh_r = base + up * (0.74 * k) + r * 0.24;
-    let sh_l = base + up * (0.74 * k) - r * 0.24;
+    let sh_r = hip + dir_t * (0.34 * kb) + r * 0.24;
+    let sh_l = hip + dir_t * (0.34 * kb) - r * 0.24;
     let hand_r = gc - d * 0.05 - u2 * 0.045;
     let hand_l = gc + d * 0.17 - u2 * 0.04;
     for (sh, hand) in [(sh_r, hand_r), (sh_l, hand_l)] {

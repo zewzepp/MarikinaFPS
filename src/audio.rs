@@ -14,23 +14,35 @@ impl Rng {
 }
 
 fn wav(samples: &[f32]) -> Vec<u8> {
-    let n = samples.len() as u32;
-    let mut b: Vec<u8> = Vec::with_capacity(44 + samples.len() * 2);
+    // Output canonical 44.1 kHz / 16-bit / stereo PCM (the most widely supported format);
+    // the generators run at RATE and are linearly upsampled here.
+    let up = 2usize;
+    let out_rate = RATE * up as u32;
+    let frames = samples.len() * up;
+    let data_len = (frames * 4) as u32;
+    let mut b: Vec<u8> = Vec::with_capacity(44 + frames * 4);
     b.extend_from_slice(b"RIFF");
-    b.extend_from_slice(&(36 + n * 2).to_le_bytes());
+    b.extend_from_slice(&(36 + data_len).to_le_bytes());
     b.extend_from_slice(b"WAVEfmt ");
     b.extend_from_slice(&16u32.to_le_bytes());
     b.extend_from_slice(&1u16.to_le_bytes());
-    b.extend_from_slice(&1u16.to_le_bytes());
-    b.extend_from_slice(&RATE.to_le_bytes());
-    b.extend_from_slice(&(RATE * 2).to_le_bytes());
     b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&out_rate.to_le_bytes());
+    b.extend_from_slice(&(out_rate * 4).to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
     b.extend_from_slice(&16u16.to_le_bytes());
     b.extend_from_slice(b"data");
-    b.extend_from_slice(&(n * 2).to_le_bytes());
-    for s in samples {
-        let v = (s.clamp(-1.0, 1.0) * 32000.0) as i16;
-        b.extend_from_slice(&v.to_le_bytes());
+    b.extend_from_slice(&data_len.to_le_bytes());
+    for i in 0..samples.len() {
+        let a = samples[i];
+        let c = if i + 1 < samples.len() { samples[i + 1] } else { a };
+        for k in 0..up {
+            let s = a + (c - a) * (k as f32 / up as f32);
+            let v = (s.clamp(-1.0, 1.0) * 30000.0) as i16;
+            let le = v.to_le_bytes();
+            b.extend_from_slice(&le);
+            b.extend_from_slice(&le);
+        }
     }
     b
 }
@@ -179,6 +191,7 @@ pub struct Sfx {
     ui: Option<Sound>,
     amb: Option<Sound>,
     pub master: f32,
+    pub loaded: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -217,9 +230,15 @@ impl Sfx {
             ui: ld(click(1500.0, 0.05, 0.5, 3)).await,
             amb: ld(ambient()).await,
             master: 1.0,
+            loaded: 0,
         };
+        let mut s = s;
+        s.loaded = [&s.shot, &s.empty, &s.reload, &s.step, &s.jump, &s.land, &s.slide, &s.hit, &s.ding, &s.impact, &s.scope, &s.ui, &s.amb]
+            .iter()
+            .filter(|x| x.is_some())
+            .count();
         if let Some(a) = &s.amb {
-            play_sound(a, PlaySoundParams { looped: true, volume: 0.25 });
+            play_sound(a, PlaySoundParams { looped: true, volume: 0.25 * s.master });
         }
         s
     }

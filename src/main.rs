@@ -2,6 +2,7 @@ mod audio;
 mod game;
 mod gfx;
 mod render;
+mod save;
 mod tex;
 mod ui;
 mod world;
@@ -41,8 +42,11 @@ async fn main() {
     let mut touch_seen = false;
 
     let mut screen = Screen::Play;
-    let mut slide_hold = false; // false = tap to slide, true = hold to slide
-    let mut cfg: Option<[ElemCfg; 6]> = None;
+    let saved = save::load();
+    sfx.master = saved.volume;
+    let mut slide_hold = saved.slide_hold; // false = tap to slide, true = hold to slide
+    let mut cfg: Option<[ElemCfg; 6]> = saved.cfg;
+    let mut last_saved = String::new();
     let mut sel: usize = 3;
     let mut win_pos: Option<Vec2> = None;
     let mut win_off = Vec2::ZERO;
@@ -316,6 +320,7 @@ async fn main() {
 
         // ------------------------------------------------ menus
         let mut new_screen = screen;
+        let mut left_menu = false;
         if open_settings {
             new_screen = Screen::Settings;
         }
@@ -340,6 +345,9 @@ async fn main() {
                     }
                     if tapped(btn(1, 286.0, 56.0)) {
                         sfx.master = (((sfx.master + 0.1) * 10.0).round() / 10.0).min(1.0);
+                    }
+                    if tapped(btn(1, 150.0, 56.0)) || tapped(btn(1, 286.0, 56.0)) {
+                        sfx.play(Snd::Shot, 0.6);
                     }
                     if tapped(btn(2, 12.0, 406.0)) {
                         new_screen = Screen::Edit;
@@ -401,6 +409,7 @@ async fn main() {
             }
         }
         if new_screen != screen {
+            left_menu = true;
             screen = new_screen;
             roles.clear();
             last.clear();
@@ -415,6 +424,17 @@ async fn main() {
             for i in 0..6 {
                 let c = vec2(cf[i].pos.x * w, cf[i].pos.y * h);
                 cf[i].pos = tmp.clamp_pos(i, c, w, h);
+            }
+        }
+        // persist HUD layout / settings once the finger or mouse is released
+        if screen != Screen::Play || left_menu {
+            let idle = roles.is_empty() && mouse_drag.is_none() && mouse_win.is_none();
+            if idle {
+                let txt = save::encode(&cf, slide_hold, sfx.master);
+                if txt != last_saved {
+                    save::save(&txt);
+                    last_saved = txt;
+                }
             }
         }
         cfg = Some(cf);
@@ -567,6 +587,7 @@ async fn main() {
             match screen {
                 Screen::Settings => {
                     draw_text("SETTINGS   (drag here to move)", wp.x + 12.0 * u, wp.y + 25.0 * u, 18.0 * u, WHITE);
+                    draw_text(&format!("snd {}/13", sfx.loaded), wp.x + ws.x - 78.0 * u, wp.y + 25.0 * u, 16.0 * u, Color::new(0.7, 0.85, 1.0, 1.0));
                     draw_text("Slide", wp.x + 14.0 * u, row_y(0) + 30.0 * u, 20.0 * u, txt);
                     ui_button(btn(0, 150.0, 120.0), "TAP", !slide_hold, u);
                     ui_button(btn(0, 282.0, 120.0), "HOLD", slide_hold, u);
