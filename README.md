@@ -1,6 +1,6 @@
 # Rusty FPS Sketch
 
-A small third-person shooter sketch in Rust (macroquad 3D). Over-the-shoulder camera, a blocky character, a training yard with crates and moving targets.
+A third-person shooter sketch in Rust (macroquad 3D) set in a large procedurally generated city (about 300 m x 300 m, 9x9 blocks): streets with lane markings and crosswalks, sidewalks, parks, parking lots, parked cars, street lamps, and buildings from low-rise to downtown towers. All textures (asphalt, sidewalk, concrete, grass, brick / concrete / glass facades, wooden crates) are generated in code at start-up, so there are no asset files. Distant geometry fades into haze. Moving targets are scattered along the streets.
 
 ## Run it
 
@@ -14,10 +14,10 @@ cargo run
 
 - **Touch:** floating joystick on the left (touch anywhere on the left side), drag the right side to look. Buttons: Fire (hold), Jump, Rel (reload), Scope (toggle) and **Snk/Slide**.
 - **Snk/Slide:** walking shows **Snk** (tap to toggle sneak). Push the joystick all the way out to run and the button turns into **Slide**. Pick tap-to-slide or hold-to-slide in Settings.
-- **Settings** (octagon, top right): slide mode, and **Customize HUD** with a floating window (drag its title bar to move it). Tap a button on screen or use < > to select it, then change size, opacity or nudge it. Layout resets when the app restarts.
+- **Settings** (octagon, top right): slide mode, and **Customize HUD** with a floating window (drag its title bar to move it). **Drag any button or the joystick anywhere on the screen** to place it, use < > to pick one, then change size and opacity (or nudge it). Layout resets when the app restarts.
 - **Desktop:** WASD move, hold Shift to run, hold right mouse and move to look, left mouse fire, Space jump, R reload, F scope, C sneak/slide, Ctrl sneak, Esc quit. Click the Settings octagon for the menu.
 
-Crates are low enough to jump over or stand on. Targets respawn after a few seconds.
+Crates are low enough to jump over or stand on; cars, trees and buildings are not. Targets respawn after a few seconds. Start-up takes a moment while the city and textures are generated.
 
 ## Android APK
 
