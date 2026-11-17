@@ -344,7 +344,8 @@ impl Game {
         for _ in 0..count {
             let v = (n + vec3(self.rf() - 0.5, self.rf() - 0.5, self.rf() - 0.5) * 1.6) * speed * (0.4 + self.rf());
             let life = 0.3 + self.rf() * 0.5;
-            self.parts.push(Part { p, v, life, max: life, size: size * (0.6 + self.rf() * 0.8), col, grav: 9.0 });
+            let sz = size * (0.6 + self.rf() * 0.8);
+            self.parts.push(Part { p, v, life, max: life, size: sz, col, grav: 9.0 });
         }
         if self.parts.len() > 400 {
             let n = self.parts.len() - 400;

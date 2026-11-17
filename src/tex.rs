@@ -111,7 +111,7 @@ pub fn build_atlas() -> (Vec<u8>, [[f32; 3]; NTILES]) {
                         if mortar {
                             [0.68, 0.66, 0.62]
                         } else {
-                            mulc([0.60, 0.28, 0.20], 0.9 + hash(((fx * 5.0 + off) as i32), row, 3) * 0.25 + n * 0.1)
+                            mulc([0.60, 0.28, 0.20], 0.9 + hash((fx * 5.0 + off) as i32, row, 3) * 0.25 + n * 0.1)
                         }
                     }
                     T_WOOD => {
