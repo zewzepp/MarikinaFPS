@@ -1,29 +1,20 @@
 use macroquad::prelude::*;
 use std::collections::HashMap;
 use std::f32::consts::TAU;
+use std::sync::OnceLock;
 
-// '#' = wall, 'c' = low crate (jump over it or onto it), '.' = floor
-const MAP: [&str; 14] = [
-    "####################",
-    "#..................#",
-    "#..cc..........cc..#",
-    "#..................#",
-    "#.......####.......#",
-    "#.......#..........#",
-    "#..................#",
-    "#.c..............c.#",
-    "#..........##......#",
-    "#..................#",
-    "#..cc..............#",
-    "#..................#",
-    "#.............cc...#",
-    "####################",
-];
+// ---------------------------------------------------------------------------
+// City constants. Everything is built from a 1 m cell grid.
+//   road 8 | sidewalk 4 | two 8x8 lots | sidewalk 4 | road ...   (pitch 32)
+// ---------------------------------------------------------------------------
+const P: usize = 32; // block pitch (road + block)
+const NB: usize = 9; // blocks per side
+const GW: usize = NB * P + 8; // grid width in cells (296 m)
 
-const WALL_H: f32 = 1.5;
 const CRATE_H: f32 = 0.5;
+const CAR_H: f32 = 1.3;
 const PLAYER_R: f32 = 0.2;
-const MAX_DIST: f32 = 40.0;
+const MAX_DIST: f32 = 150.0;
 const MAG: i32 = 12;
 const GRAVITY: f32 = 11.5;
 const JUMP_V: f32 = 4.6;
@@ -32,58 +23,578 @@ const SPRINT_SPEED: f32 = 5.2;
 const SNEAK_SPEED: f32 = 1.5;
 const SPRINT_TILT: f32 = 0.9; // joystick pushed this far = running
 
-fn cell(x: f32, z: f32) -> u8 {
-    if x < 0.0 || z < 0.0 {
-        return b'#';
-    }
-    MAP.get(z as usize)
-        .and_then(|row| row.as_bytes().get(x as usize))
-        .copied()
-        .unwrap_or(b'#')
-}
+// texture ids (1-based, 0 = untextured)
+const T_ASPHALT: usize = 1;
+const T_SIDEWALK: usize = 2;
+const T_CONCRETE: usize = 3;
+const T_GRASS: usize = 4;
+const T_FAC0: usize = 5; // concrete facade
+const T_CRATE: usize = 8;
 
 fn height_at(x: f32, z: f32) -> f32 {
-    match cell(x, z) {
-        b'#' => WALL_H,
-        b'c' => CRATE_H,
-        _ => 0.0,
+    if x < 0.0 || z < 0.0 {
+        return 99.0;
     }
+    let (ix, iz) = (x as usize, z as usize);
+    if ix >= GW || iz >= GW {
+        return 99.0;
+    }
+    city().h[iz * GW + ix]
 }
 
 // ---------------------------------------------------------------------------
-// Tiny 3D helper: collects boxes/quads into a mesh so we make few draw calls.
+// Tiny deterministic RNG + tileable noise (no extra crates needed)
+// ---------------------------------------------------------------------------
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn f(&mut self) -> f32 {
+        (self.next() >> 40) as f32 / 16777216.0
+    }
+}
+
+fn hash2(x: i32, y: i32, seed: u32) -> f32 {
+    let mut n = (x as u32).wrapping_mul(374761393)
+        ^ (y as u32).wrapping_mul(668265263)
+        ^ seed.wrapping_mul(2246822519);
+    n = (n ^ (n >> 13)).wrapping_mul(1274126177);
+    ((n ^ (n >> 16)) & 0xFFFF) as f32 / 65535.0
+}
+
+// value noise that wraps every px / py lattice cells, so textures tile
+fn vn(x: f32, y: f32, px: i32, py: i32, seed: u32) -> f32 {
+    let xf = x.floor();
+    let yf = y.floor();
+    let fx = x - xf;
+    let fy = y - yf;
+    let (xi, yi) = (xf as i32, yf as i32);
+    let sx = fx * fx * (3.0 - 2.0 * fx);
+    let sy = fy * fy * (3.0 - 2.0 * fy);
+    let g = |a: i32, b: i32| hash2(a.rem_euclid(px), b.rem_euclid(py), seed);
+    let (a, b, c, d) = (g(xi, yi), g(xi + 1, yi), g(xi, yi + 1), g(xi + 1, yi + 1));
+    let top = a + (b - a) * sx;
+    let bot = c + (d - c) * sx;
+    top + (bot - top) * sy
+}
+
+fn fbm(u: f32, v: f32, f: i32, oct: u32, seed: u32) -> f32 {
+    let mut s = 0.0;
+    let mut a = 0.5;
+    let mut norm = 0.0;
+    let mut fr = f;
+    for o in 0..oct {
+        s += a * vn(u * fr as f32, v * fr as f32, fr, fr, seed + o * 17);
+        norm += a;
+        a *= 0.5;
+        fr *= 2;
+    }
+    s / norm
+}
+
+fn speck(u: f32, v: f32, n: i32, seed: u32) -> f32 {
+    hash2((u * n as f32) as i32, (v * n as f32) as i32, seed)
+}
+fn fr(x: f32) -> f32 {
+    x - x.floor()
+}
+fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+fn sc(c: [f32; 3], k: f32) -> [f32; 3] {
+    [c[0] * k, c[1] * k, c[2] * k]
+}
+
+// ---------------------------------------------------------------------------
+// Procedural textures (generated at start-up, no asset files needed)
+// ---------------------------------------------------------------------------
+fn make_tex(size: usize, f: impl Fn(f32, f32) -> [f32; 3]) -> Texture2D {
+    let mut bytes = Vec::with_capacity(size * size * 4);
+    for y in 0..size {
+        for x in 0..size {
+            let c = f((x as f32 + 0.5) / size as f32, (y as f32 + 0.5) / size as f32);
+            bytes.push((c[0].clamp(0.0, 1.0) * 255.0) as u8);
+            bytes.push((c[1].clamp(0.0, 1.0) * 255.0) as u8);
+            bytes.push((c[2].clamp(0.0, 1.0) * 255.0) as u8);
+            bytes.push(255);
+        }
+    }
+    let img = Image { bytes, width: size as u16, height: size as u16 };
+    let t = Texture2D::from_image(&img);
+    t.set_filter(FilterMode::Linear);
+    t
+}
+
+fn tex_asphalt() -> Texture2D {
+    make_tex(256, |u, v| {
+        let m = fbm(u, v, 4, 4, 11);
+        let s = speck(u, v, 256, 3);
+        let mut g = 0.15 + 0.10 * m + (s - 0.5) * 0.09;
+        if s > 0.985 {
+            g += 0.16; // loose gravel
+        }
+        let st = fbm(u, v, 3, 3, 5); // oil / wear patches
+        if st > 0.60 {
+            g *= 1.0 - (st - 0.60) * 1.8;
+        }
+        let cr = (fbm(u, v, 6, 3, 9) - 0.5).abs(); // hairline cracks
+        if cr < 0.01 {
+            g *= 0.45;
+        }
+        [g * 1.02, g, g * 1.05]
+    })
+}
+
+fn tex_sidewalk() -> Texture2D {
+    make_tex(256, |u, v| {
+        let (su, sv) = (u * 2.0, v * 2.0);
+        let tint = hash2(su.floor() as i32, sv.floor() as i32, 21);
+        let m = fbm(u, v, 4, 4, 22);
+        let s = speck(u, v, 256, 23);
+        let mut g = 0.50 + 0.10 * m + (tint - 0.5) * 0.07 + (s - 0.5) * 0.06;
+        let (fu, fv) = (fr(su), fr(sv));
+        let j = fu.min(1.0 - fu).min(fv).min(1.0 - fv);
+        if j < 0.015 {
+            g *= 0.55;
+        } else if j < 0.03 {
+            g *= 0.9;
+        }
+        let st = fbm(u, v, 3, 3, 24);
+        if st > 0.6 {
+            g *= 1.0 - (st - 0.6) * 1.4;
+        }
+        [g, g * 0.99, g * 0.96]
+    })
+}
+
+fn tex_concrete() -> Texture2D {
+    make_tex(256, |u, v| {
+        let m = fbm(u, v, 5, 4, 51);
+        let s = speck(u, v, 256, 52);
+        let mut g = 0.44 + 0.12 * m + (s - 0.5) * 0.07;
+        let e = u.min(1.0 - u).min(v).min(1.0 - v);
+        if e < 0.008 {
+            g *= 0.6;
+        }
+        let st = fbm(u, v, 3, 3, 53);
+        if st > 0.58 {
+            g *= 1.0 - (st - 0.58) * 1.6;
+        }
+        [g * 0.98, g, g * 1.03]
+    })
+}
+
+fn tex_grass() -> Texture2D {
+    make_tex(256, |u, v| {
+        let m = fbm(u, v, 4, 4, 31);
+        let blade = vn(u * 128.0, v * 16.0, 128, 16, 32);
+        let s = speck(u, v, 256, 33);
+        let dry = fbm(u, v, 2, 3, 34);
+        let base = mix([0.12, 0.25, 0.07], [0.30, 0.33, 0.12], dry * 0.9);
+        sc(base, 0.95 + 0.35 * (m - 0.5) + 0.45 * (blade - 0.5) + 0.30 * (s - 0.5))
+    })
+}
+
+fn tex_crate() -> Texture2D {
+    make_tex(256, |u, v| {
+        let grain = |seed: u32, k: f32| vn(u * 6.0, v * 48.0 + k, 6, 48, seed);
+        let s = speck(u, v, 256, 61);
+        let border = u < 0.10 || u > 0.90 || v < 0.10 || v > 0.90;
+        let brace = ((u - v).abs() < 0.05 || (u + v - 1.0).abs() < 0.05) && !border;
+        let mut c;
+        if border || brace {
+            c = sc([0.44, 0.29, 0.15], 0.8 + 0.4 * grain(62, 0.0) + (s - 0.5) * 0.1);
+        } else {
+            let pi = (u * 5.0).floor();
+            let tone = hash2(pi as i32, 0, 63);
+            c = sc([0.58, 0.40, 0.21], 0.75 + 0.35 * tone + 0.35 * grain(64, pi * 7.0) + (s - 0.5) * 0.1);
+            if fr(u * 5.0) < 0.035 {
+                c = sc(c, 0.35);
+            }
+        }
+        // nails
+        for (nx, ny) in [(0.05f32, 0.05f32), (0.95, 0.05), (0.05, 0.95), (0.95, 0.95)] {
+            if (u - nx).powi(2) + (v - ny).powi(2) < 0.0003 {
+                c = [0.25, 0.25, 0.27];
+            }
+        }
+        c
+    })
+}
+
+// style 0 = concrete, 1 = brick, 2 = glass curtain wall. One tile = 8 m x 8 m
+// (2 bays x 2 floors), anchored at the bottom so floors line up on tall walls.
+fn tex_facade(style: u8) -> Texture2D {
+    make_tex(512, move |u, v| {
+        let xm = u * 8.0;
+        let ym = (1.0 - v) * 8.0;
+        let idx = (u * 2.0).floor() as i32;
+        let lu = fr(u * 2.0);
+        let fy = (ym / 4.0).floor() as i32;
+        let lv = fr(ym / 4.0); // 0 = floor, 1 = ceiling
+        let id = hash2(idx, fy, 40 + style as u32);
+        let s = speck(u, v, 512, 41);
+
+        if style == 2 {
+            if lv < 0.16 {
+                let n = fbm(u, v, 8, 3, 42);
+                return sc([0.30, 0.36, 0.38], 0.85 + 0.3 * n + (s - 0.5) * 0.08);
+            }
+            let pu = fr(u * 4.0);
+            if pu < 0.025 || pu > 0.975 {
+                return [0.58, 0.60, 0.61];
+            }
+            let wv = ((lv - 0.16) / 0.84).clamp(0.0, 1.0);
+            let cl = fbm(u, v, 6, 4, 43);
+            let sky = mix([0.45, 0.60, 0.72], [0.80, 0.87, 0.93], cl);
+            let mut c = mix([0.07, 0.12, 0.15], sky, ((wv * 1.1).min(1.0)) * 0.85 * (0.5 + cl * 0.6));
+            if id > 0.9 {
+                c = mix(c, [0.9, 0.75, 0.45], 0.55);
+            }
+            return sc(c, 0.95 + (s - 0.5) * 0.06);
+        }
+
+        // wall surface
+        let mut c;
+        if style == 1 {
+            let row = (ym / 0.1).floor() as i32;
+            let off = if row % 2 == 0 { 0.0 } else { 0.16 };
+            let bu = (xm + off) / 0.32;
+            let col = (bu.floor() as i32).rem_euclid(25);
+            let (fu, fvv) = (fr(bu), fr(ym / 0.1));
+            if fu < 0.07 || fvv < 0.12 {
+                c = sc([0.60, 0.58, 0.54], 0.9 + 0.2 * s);
+            } else {
+                let tone = hash2(col, row.rem_euclid(80), 44);
+                c = sc(
+                    mix([0.50, 0.22, 0.16], [0.66, 0.34, 0.24], tone),
+                    0.88 + 0.2 * fbm(u, v, 16, 2, 45) + (s - 0.5) * 0.12,
+                );
+            }
+        } else {
+            let m = fbm(u, v, 8, 4, 46);
+            let mut g = 0.60 + 0.12 * (m - 0.5) + (s - 0.5) * 0.05;
+            if lv < 0.02 || lu < 0.008 || lu > 0.992 {
+                g *= 0.8; // panel joints
+            }
+            if lu > 0.2 && lu < 0.8 && lv < 0.28 {
+                let st = vn(u * 128.0, v * 4.0, 128, 4, 47); // rain streaks under the sill
+                g *= 1.0 - 0.28 * st * (1.0 - lv / 0.28);
+            }
+            c = [g, g * 0.99, g * 0.95];
+        }
+
+        // punched window
+        let wu = (lu - 0.20) / 0.60;
+        let wt = (0.84 - lv) / 0.56; // 0 = top, 1 = bottom
+        if wu >= 0.0 && wu <= 1.0 && wt >= 0.0 && wt <= 1.0 {
+            if wu < 0.07 || wu > 0.93 || wt < 0.07 || wt > 0.93 || (wu - 0.5).abs() < 0.025 {
+                return [0.80, 0.80, 0.77];
+            }
+            let mut g = mix([0.55, 0.68, 0.80], [0.06, 0.08, 0.11], (wt * 1.2).min(1.0));
+            if fr((wu * 0.9 - wt * 0.6) * 2.0) < 0.12 {
+                g = sc(g, 1.25); // glare streak
+            }
+            if id > 0.82 {
+                g = mix(g, [0.88, 0.68, 0.38], 0.75 * (1.0 - wt * 0.4)); // lights on
+            } else if id > 0.58 && wt < 0.35 + 0.4 * id {
+                g = [0.66, 0.62, 0.55]; // blinds half drawn
+            }
+            if wt < 0.14 {
+                g = sc(g, 0.7); // recess shadow
+            }
+            return g;
+        }
+        if lv >= 0.22 && lv < 0.28 && wu > -0.06 && wu < 1.06 {
+            return [0.78, 0.77, 0.74]; // sill
+        }
+        if style == 1 && lv >= 0.84 && lv < 0.89 && wu > -0.06 && wu < 1.06 {
+            return [0.70, 0.69, 0.66]; // stone lintel
+        }
+        c
+    })
+}
+
+fn make_textures() -> Vec<Texture2D> {
+    vec![
+        tex_asphalt(),
+        tex_sidewalk(),
+        tex_concrete(),
+        tex_grass(),
+        tex_facade(0),
+        tex_facade(1),
+        tex_facade(2),
+        tex_crate(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// The city: collision heights, ground kinds and a list of things to draw
+// ---------------------------------------------------------------------------
+#[derive(Clone, Copy)]
+enum Prop {
+    Building { x0: f32, z0: f32, x1: f32, z1: f32, h: f32, style: u8 },
+    Tree { x: f32, z: f32, s: f32 },
+    Car { x: f32, z: f32, along_z: bool, col: u8 },
+    Crate { x: f32, z: f32 },
+    Lamp { x: f32, z: f32 },
+}
+
+struct City {
+    h: Vec<f32>,
+    kind: Vec<u8>, // 0 asphalt, 1 sidewalk, 2 concrete, 3 grass
+    props: Vec<Prop>,
+    spots: Vec<(f32, f32)>,
+}
+
+static CITY: OnceLock<City> = OnceLock::new();
+fn city() -> &'static City {
+    CITY.get_or_init(build_city)
+}
+
+fn mark(h: &mut [f32], x0: usize, z0: usize, w: usize, d: usize, v: f32) {
+    for z in z0..(z0 + d).min(GW) {
+        for x in x0..(x0 + w).min(GW) {
+            if h[z * GW + x] < v {
+                h[z * GW + x] = v;
+            }
+        }
+    }
+}
+
+fn build_city() -> City {
+    let mut rng = Rng(0x2545F4914F6CDD1D);
+    let mut h = vec![0.0f32; GW * GW];
+    let mut kind = vec![2u8; GW * GW];
+    let mut props: Vec<Prop> = Vec::new();
+    let gwf = GW as f32;
+    let cen = gwf * 0.5;
+
+    for z in 0..GW {
+        for x in 0..GW {
+            let (lx, lz) = (x % P, z % P);
+            kind[z * GW + x] = if lx < 8 || lz < 8 {
+                0
+            } else if lx - 8 < 4 || lx - 8 >= 20 || lz - 8 < 4 || lz - 8 >= 20 {
+                1
+            } else {
+                2
+            };
+            if x == 0 || z == 0 || x == GW - 1 || z == GW - 1 {
+                h[z * GW + x] = 9.0; // city boundary wall
+            }
+        }
+    }
+    for (x0, z0, x1, z1) in [(0.0, 0.0, gwf, 1.0), (0.0, gwf - 1.0, gwf, gwf), (0.0, 0.0, 1.0, gwf), (gwf - 1.0, 0.0, gwf, gwf)] {
+        props.push(Prop::Building { x0, z0, x1, z1, h: 9.0, style: 0 });
+    }
+
+    for bx in 0..NB {
+        for bz in 0..NB {
+            let ox = (bx * P + 8) as f32;
+            let oz = (bz * P + 8) as f32;
+            let d = (((ox + 12.0 - cen).powi(2) + (oz + 12.0 - cen).powi(2)).sqrt() / cen).min(1.0);
+            let center = bx == NB / 2 && bz == NB / 2;
+
+            for i in 0..2 {
+                for j in 0..2 {
+                    let lx0 = ox + 4.0 + i as f32 * 8.0;
+                    let lz0 = oz + 4.0 + j as f32 * 8.0;
+                    let roll = rng.f();
+                    let lot = if center {
+                        1
+                    } else if d < 0.35 {
+                        if roll < 0.85 { 0 } else if roll < 0.92 { 1 } else { 2 }
+                    } else if roll < 0.62 {
+                        0
+                    } else if roll < 0.77 {
+                        1
+                    } else if roll < 0.90 {
+                        2
+                    } else {
+                        3
+                    };
+                    let (ix, iz) = (lx0 as usize, lz0 as usize);
+                    match lot {
+                        0 => {
+                            let mut inset = || if rng.f() < 0.35 { 1.0f32 } else { 0.0 };
+                            let (a, b, c, e) = (inset(), inset(), inset(), inset());
+                            let (x0, x1, z0, z1) = (lx0 + a, lx0 + 8.0 - b, lz0 + c, lz0 + 8.0 - e);
+                            let hb = 8.0 + (1.0 - d).powf(1.6) * 58.0 * (0.25 + 0.75 * rng.f()) + rng.f() * 8.0;
+                            let bh = ((hb / 4.0).round() * 4.0).max(8.0);
+                            let style = if bh > 32.0 && rng.f() < 0.7 {
+                                2
+                            } else if rng.f() < 0.5 {
+                                1
+                            } else {
+                                0
+                            };
+                            mark(&mut h, x0 as usize, z0 as usize, (x1 - x0) as usize, (z1 - z0) as usize, bh);
+                            props.push(Prop::Building { x0, z0, x1, z1, h: bh, style });
+                        }
+                        1 => {
+                            for zz in 0..8 {
+                                for xx in 0..8 {
+                                    kind[(iz + zz) * GW + ix + xx] = 3;
+                                }
+                            }
+                            let n = if center { 9 } else { 4 + (rng.f() * 3.0) as usize };
+                            for _ in 0..n {
+                                let tx = ix + 1 + (rng.f() * 6.0) as usize;
+                                let tz = iz + 1 + (rng.f() * 6.0) as usize;
+                                if h[tz * GW + tx] == 0.0 {
+                                    h[tz * GW + tx] = 1.0;
+                                    props.push(Prop::Tree { x: tx as f32 + 0.5, z: tz as f32 + 0.5, s: 0.8 + 0.5 * rng.f() });
+                                }
+                            }
+                        }
+                        2 => {
+                            let n = 3 + (rng.f() * 4.0) as usize;
+                            for _ in 0..n {
+                                let tx = ix + (rng.f() * 8.0) as usize;
+                                let tz = iz + (rng.f() * 8.0) as usize;
+                                if h[tz * GW + tx] == 0.0 {
+                                    h[tz * GW + tx] = CRATE_H;
+                                    props.push(Prop::Crate { x: tx as f32 + 0.5, z: tz as f32 + 0.5 });
+                                }
+                            }
+                        }
+                        _ => {
+                            for zz in 0..8 {
+                                for xx in 0..8 {
+                                    kind[(iz + zz) * GW + ix + xx] = 0;
+                                }
+                            }
+                            for k in 0..2usize {
+                                if rng.f() < 0.75 {
+                                    let xs = ix + 1 + k * 4;
+                                    let zs = iz + 1 + (rng.f() * 2.0) as usize;
+                                    mark(&mut h, xs, zs, 2, 5, CAR_H);
+                                    props.push(Prop::Car { x: xs as f32 + 1.0, z: zs as f32 + 2.5, along_z: true, col: (rng.next() % 8) as u8 });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // street lamps on the sidewalks
+            for t in [6.0f32, 18.0] {
+                props.push(Prop::Lamp { x: ox + 0.7, z: oz + t });
+                props.push(Prop::Lamp { x: ox + 23.3, z: oz + t });
+                props.push(Prop::Lamp { x: ox + t, z: oz + 0.7 });
+                props.push(Prop::Lamp { x: ox + t, z: oz + 23.3 });
+            }
+        }
+    }
+
+    // parked cars along the curb lanes of every road (centre lanes stay clear)
+    for r in 0..=NB {
+        let base = r * P;
+        for seg in 0..NB {
+            let s0 = seg * P + 8;
+            for side in 0..2usize {
+                if (r == 0 && side == 0) || (r == NB && side == 1) {
+                    continue;
+                }
+                let off = if side == 0 { 0 } else { 6 };
+                for k in 0..3usize {
+                    let t0 = s0 + 4 + k * 5;
+                    let col = (rng.next() % 8) as u8;
+                    if rng.f() >= 0.45 {
+                        mark(&mut h, base + off, t0, 2, 5, CAR_H);
+                        props.push(Prop::Car { x: (base + off) as f32 + 1.0, z: t0 as f32 + 2.5, along_z: true, col });
+                    }
+                    if rng.f() >= 0.45 {
+                        mark(&mut h, t0, base + off, 5, 2, CAR_H);
+                        props.push(Prop::Car { x: t0 as f32 + 2.5, z: (base + off) as f32 + 1.0, along_z: false, col: (col + 3) % 8 });
+                    }
+                }
+            }
+        }
+    }
+
+    // shooting-range targets scattered along the streets
+    let mut spots = Vec::new();
+    for _ in 0..36 {
+        let r = ((rng.f() * (NB + 1) as f32) as usize).min(NB);
+        let seg = ((rng.f() * NB as f32) as usize).min(NB - 1);
+        let t = (seg * P + 8) as f32 + 3.0 + rng.f() * 18.0;
+        let c = (r * P) as f32 + 4.0;
+        if rng.f() < 0.5 {
+            spots.push((c, t));
+        } else {
+            spots.push((t, c));
+        }
+    }
+
+    City { h, kind, props, spots }
+}
+
+// ---------------------------------------------------------------------------
+// Batched 3D drawing: boxes / quads collected into few meshes, with texture
+// switching and distance fade (the sky shows through, which reads as haze).
 // ---------------------------------------------------------------------------
 struct Batch {
     v: Vec<Vertex>,
     i: Vec<u16>,
+    tex: usize,
+    texs: Vec<Texture2D>,
+    cam: Vec3,
+    fs: f32, // fade start distance
+    fe: f32, // fully faded distance
 }
 
 impl Batch {
-    fn new() -> Self {
-        Self { v: Vec::new(), i: Vec::new() }
+    fn new(texs: Vec<Texture2D>, cam: Vec3) -> Self {
+        Self { v: Vec::new(), i: Vec::new(), tex: 0, texs, cam, fs: 1.0e6, fe: 2.0e6 }
     }
 
     fn flush(&mut self) {
         if self.v.is_empty() {
             return;
         }
-        let mesh = Mesh {
-            vertices: std::mem::take(&mut self.v),
-            indices: std::mem::take(&mut self.i),
-            texture: None,
-        };
+        let texture = if self.tex == 0 { None } else { Some(self.texs[self.tex - 1].clone()) };
+        let mesh = Mesh { vertices: std::mem::take(&mut self.v), indices: std::mem::take(&mut self.i), texture };
         draw_mesh(&mesh);
     }
 
-    fn quad(&mut self, p: [Vec3; 4], col: Color) {
+    fn set_tex(&mut self, t: usize) {
+        if t != self.tex {
+            self.flush();
+            self.tex = t;
+        }
+    }
+
+    fn fog(&self, p: Vec3) -> f32 {
+        let d = (p - self.cam).length();
+        1.0 - ((d - self.fs) / (self.fe - self.fs)).clamp(0.0, 1.0)
+    }
+
+    fn tquad(&mut self, tex: usize, p: [Vec3; 4], uv: [(f32, f32); 4], col: Color) {
+        let f = [self.fog(p[0]), self.fog(p[1]), self.fog(p[2]), self.fog(p[3])];
+        if f.iter().all(|a| *a < 0.01) {
+            return;
+        }
+        self.set_tex(tex);
         let base = self.v.len() as u16;
-        for q in p {
-            self.v.push(Vertex::new(q.x, q.y, q.z, 0.0, 0.0, col));
+        for k in 0..4 {
+            let c = Color::new(col.r, col.g, col.b, col.a * f[k]);
+            self.v.push(Vertex::new(p[k].x, p[k].y, p[k].z, uv[k].0, uv[k].1, c));
         }
         self.i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        if self.v.len() > 1500 {
+        if self.v.len() > 6000 {
             self.flush();
         }
+    }
+
+    fn quad(&mut self, p: [Vec3; 4], col: Color) {
+        self.tquad(0, p, [(0.0, 0.0); 4], col);
     }
 
     // Box from three half-extent axis vectors (so it can be rotated / tilted),
@@ -185,9 +696,9 @@ struct Game {
 impl Game {
     fn new() -> Self {
         Self {
-            x: 2.5,
+            x: 132.0,
             y: 0.0,
-            z: 11.5,
+            z: 132.0,
             vy: 0.0,
             grounded: true,
             yaw: -0.5,
@@ -211,13 +722,12 @@ impl Game {
             walk: 0.0,
             moving: 0.0,
             kills: 0,
-            targets: vec![
-                Target::new(9.5, 2.5, 0.0),
-                Target::new(15.5, 6.5, 1.8),
-                Target::new(6.5, 11.5, 3.2),
-                Target::new(13.5, 9.5, 4.4),
-                Target::new(17.5, 11.5, 5.6),
-            ],
+            targets: city()
+                .spots
+                .iter()
+                .enumerate()
+                .map(|(i, &(x, z))| Target::new(x, z, i as f32 * 1.3))
+                .collect(),
             tracer: None,
             tracer_t: 0.0,
             hit_t: 0.0,
@@ -341,7 +851,7 @@ impl Game {
         let mut hit: Option<usize> = None;
         let mut t = 0.0f32;
         'march: while t < MAX_DIST {
-            t += 0.04;
+            t += 0.08;
             let p = o + d * t;
             if p.y < 0.0 || height_at(p.x, p.z) > p.y {
                 end = p;
@@ -441,6 +951,7 @@ enum Role {
     Look,
     Btn,
     Win,
+    Drag,
 }
 
 struct Pad {
@@ -451,6 +962,9 @@ struct Pad {
 
 struct Layout {
     u: f32,
+    s: f32,
+    w: f32,
+    h: f32,
     pads: [Pad; 6],
     settings: Pad,
 }
@@ -470,6 +984,9 @@ impl Layout {
         let st_y = (65.0 * s).max(st_r + 6.0 * u);
         Self {
             u,
+            s,
+            w,
+            h,
             pads: [mk(0), mk(1), mk(2), mk(3), mk(4), mk(5)],
             settings: Pad { c: vec2(st_x, st_y), r: st_r, a: 0.8 },
         }
@@ -499,6 +1016,21 @@ impl Layout {
             return Some(Elem::Joy);
         }
         None
+    }
+
+    // where element i sits with no customisation
+    fn base_c(&self, i: usize) -> Vec2 {
+        let (right, x, y, _) = BASE[i];
+        vec2(if right { self.w - (REF_W - x) * self.s } else { x * self.s }, y * self.s)
+    }
+
+    // put element i's centre at c (kept fully on screen)
+    fn place(&self, i: usize, c: Vec2, cfg: &mut [ElemCfg; 6]) {
+        let r = self.pads[i].r;
+        let c = vec2(c.x.clamp(r, (self.w - r).max(r)), c.y.clamp(r, (self.h - r).max(r)));
+        let b = self.base_c(i);
+        cfg[i].dx = (c.x - b.x) / self.s;
+        cfg[i].dy = (c.y - b.y) / self.s;
     }
 
     fn settings_hit(&self, p: Vec2) -> bool {
@@ -566,43 +1098,231 @@ fn win_geom(screen: Screen, win_pos: Option<Vec2>, w: f32, h: f32, u: f32) -> (V
 }
 
 // ---------------------------------------------------------------------------
-// Drawing the world
+// Drawing the city
 // ---------------------------------------------------------------------------
-fn draw_world(b: &mut Batch) {
-    let wall = Color::new(0.27, 0.48, 0.57, 1.0);
-    let wall_base = Color::new(0.17, 0.32, 0.39, 1.0);
-    let wall_cap = Color::new(0.46, 0.69, 0.77, 1.0);
-    let crate_c = Color::new(0.70, 0.48, 0.26, 1.0);
-    let crate_d = Color::new(0.48, 0.31, 0.16, 1.0);
-    for (gz, row) in MAP.iter().enumerate() {
-        for (gx, ch) in row.bytes().enumerate() {
-            let x = gx as f32;
-            let z = gz as f32;
-            if ch == b'#' {
-                b.aabb(vec3(x + 0.5, WALL_H * 0.5, z + 0.5), vec3(0.5, WALL_H * 0.5, 0.5), wall);
-                b.aabb(vec3(x + 0.5, 0.10, z + 0.5), vec3(0.505, 0.10, 0.505), wall_base);
-                b.aabb(vec3(x + 0.5, WALL_H - 0.04, z + 0.5), vec3(0.505, 0.04, 0.505), wall_cap);
-            } else {
-                let c = if (gx + gz) % 2 == 0 {
-                    Color::new(0.20, 0.25, 0.23, 1.0)
-                } else {
-                    Color::new(0.16, 0.20, 0.19, 1.0)
-                };
-                b.quad(
-                    [vec3(x, 0.0, z + 1.0), vec3(x + 1.0, 0.0, z + 1.0), vec3(x + 1.0, 0.0, z), vec3(x, 0.0, z)],
-                    c,
-                );
-                if ch == b'c' {
-                    b.aabb(vec3(x + 0.5, CRATE_H * 0.5, z + 0.5), vec3(0.44, CRATE_H * 0.5, 0.44), crate_c);
-                    b.aabb(vec3(x + 0.5, CRATE_H - 0.03, z + 0.5), vec3(0.465, 0.03, 0.465), crate_d);
-                    b.aabb(vec3(x + 0.5, 0.03, z + 0.5), vec3(0.465, 0.03, 0.465), crate_d);
-                    for (sx, sz) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
-                        b.aabb(
-                            vec3(x + 0.5 + sx * 0.43, CRATE_H * 0.5, z + 0.5 + sz * 0.43),
-                            vec3(0.04, CRATE_H * 0.5, 0.04),
-                            crate_d,
-                        );
+fn flat(b: &mut Batch, x: f32, z: f32, w: f32, d: f32, y: f32, col: Color) {
+    b.quad([vec3(x, y, z + d), vec3(x + w, y, z + d), vec3(x + w, y, z), vec3(x, y, z)], col);
+}
+
+fn tcube(b: &mut Batch, tex: usize, c: Vec3, hx: f32, hy: f32, hz: f32) {
+    let (x0, x1, y0, y1, z0, z1) = (c.x - hx, c.x + hx, c.y - hy, c.y + hy, c.z - hz, c.z + hz);
+    let uv = [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)];
+    let sh = |k: f32| Color::new(k, k, k, 1.0);
+    b.tquad(tex, [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)], uv, sh(0.72));
+    b.tquad(tex, [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)], uv, sh(0.84));
+    b.tquad(tex, [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)], uv, sh(0.72));
+    b.tquad(tex, [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)], uv, sh(0.88));
+    b.tquad(tex, [vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(x0, y1, z1)], uv, sh(1.0));
+}
+
+fn draw_building(b: &mut Batch, x0: f32, z0: f32, x1: f32, z1: f32, h: f32, style: u8, cam: Vec3) {
+    let tex = T_FAC0 + style as usize;
+    let light = vec3(0.39, 0.87, 0.29);
+    let up = vec3(0.0, 1.0, 0.0);
+    // (visible from camera, start corner, direction along the wall, length, outward normal)
+    let faces = [
+        (cam.z < z0, vec3(x0, 0.0, z0), vec3(1.0, 0.0, 0.0), x1 - x0, vec3(0.0, 0.0, -1.0)),
+        (cam.z > z1, vec3(x1, 0.0, z1), vec3(-1.0, 0.0, 0.0), x1 - x0, vec3(0.0, 0.0, 1.0)),
+        (cam.x < x0, vec3(x0, 0.0, z1), vec3(0.0, 0.0, -1.0), z1 - z0, vec3(-1.0, 0.0, 0.0)),
+        (cam.x > x1, vec3(x1, 0.0, z0), vec3(0.0, 0.0, 1.0), z1 - z0, vec3(1.0, 0.0, 0.0)),
+    ];
+    for (vis, o, dir, len, n) in faces {
+        if !vis {
+            continue;
+        }
+        let shade = 0.72 + 0.4 * n.dot(light).max(0.0);
+        let col = Color::new(shade, shade, shade, 1.0);
+        let mut pos = 0.0f32;
+        while pos < len {
+            let w = (len - pos).min(8.0);
+            let a = o + dir * pos;
+            let e = o + dir * (pos + w);
+            let mid = (a + e) * 0.5;
+            let dd = vec2(mid.x - cam.x, mid.z - cam.z).length();
+            if dd < b.fe + 8.0 {
+                let uw = w / 8.0;
+                let mut y = 0.0f32;
+                while y < h {
+                    let hh = (h - y).min(8.0);
+                    let vt = 1.0 - hh / 8.0;
+                    b.tquad(
+                        tex,
+                        [a + up * y, e + up * y, e + up * (y + hh), a + up * (y + hh)],
+                        [(0.0, 1.0), (uw, 1.0), (uw, vt), (0.0, vt)],
+                        col,
+                    );
+                    y += 8.0;
+                }
+            }
+            pos += 8.0;
+        }
+    }
+}
+
+fn draw_tree(b: &mut Batch, x: f32, z: f32, s: f32) {
+    let t = hash2((x * 10.0) as i32, (z * 10.0) as i32, 77);
+    let g = |k: f32| Color::new(0.10 + 0.06 * t, 0.26 + 0.12 * t * k, 0.08 + 0.04 * t, 1.0);
+    b.obox(vec3(x, 0.9 * s, z), 0.0, 0.12, 0.9 * s, 0.12, Color::new(0.25, 0.17, 0.10, 1.0));
+    b.obox(vec3(x, 2.0 * s, z), 0.3, 0.85 * s, 0.6 * s, 0.85 * s, g(0.8));
+    b.obox(vec3(x, 2.8 * s, z), 0.9, 0.65 * s, 0.5 * s, 0.65 * s, g(1.0));
+    b.obox(vec3(x, 3.4 * s, z), 0.5, 0.38 * s, 0.4 * s, 0.38 * s, g(1.2));
+}
+
+fn draw_car(b: &mut Batch, x: f32, z: f32, along_z: bool, col: u8) {
+    const COLS: [(f32, f32, f32); 8] = [
+        (0.65, 0.08, 0.08),
+        (0.10, 0.20, 0.50),
+        (0.80, 0.80, 0.82),
+        (0.08, 0.08, 0.09),
+        (0.45, 0.47, 0.50),
+        (0.12, 0.38, 0.20),
+        (0.75, 0.60, 0.15),
+        (0.55, 0.30, 0.12),
+    ];
+    let (r, g, bl) = COLS[(col % 8) as usize];
+    let body = Color::new(r, g, bl, 1.0);
+    let yaw = if along_z { std::f32::consts::FRAC_PI_2 } else { 0.0 };
+    let f = vec3(yaw.cos(), 0.0, yaw.sin());
+    let rt = vec3(-yaw.sin(), 0.0, yaw.cos());
+    let c = vec3(x, 0.0, z);
+    let up = vec3(0.0, 1.0, 0.0);
+    let glass = Color::new(0.10, 0.14, 0.18, 1.0);
+    let tire = Color::new(0.05, 0.05, 0.06, 1.0);
+    b.obox(c + up * 0.30, yaw, 2.15, 0.12, 0.88, Color::new(0.07, 0.07, 0.08, 1.0));
+    b.obox(c + up * 0.58, yaw, 2.2, 0.26, 0.9, body);
+    b.obox(c + up * 0.98 - f * 0.1, yaw, 1.1, 0.26, 0.80, glass);
+    b.obox(c + up * 1.23 - f * 0.1, yaw, 1.0, 0.04, 0.78, body);
+    for sx in [-1.3f32, 1.3] {
+        for sz in [-0.88f32, 0.88] {
+            b.obox(c + f * sx + rt * sz + up * 0.3, yaw, 0.32, 0.3, 0.1, tire);
+        }
+    }
+    for sz in [-0.65f32, 0.65] {
+        b.obox(c - f * 2.2 + rt * sz + up * 0.65, yaw, 0.02, 0.06, 0.16, Color::new(0.75, 0.05, 0.05, 1.0));
+        b.obox(c + f * 2.2 + rt * sz + up * 0.65, yaw, 0.02, 0.06, 0.16, Color::new(0.95, 0.92, 0.75, 1.0));
+    }
+}
+
+fn draw_city(b: &mut Batch, cam: Vec3) {
+    let c = city();
+
+    // ---- ground tiles (4 m) ----
+    b.fs = 45.0;
+    b.fe = 95.0;
+    let r = 95.0f32;
+    let gt = (GW / 4) as f32;
+    let tx0 = ((cam.x - r) / 4.0).floor().max(0.0) as usize;
+    let tx1 = ((cam.x + r) / 4.0).ceil().min(gt) as usize;
+    let tz0 = ((cam.z - r) / 4.0).floor().max(0.0) as usize;
+    let tz1 = ((cam.z + r) / 4.0).ceil().min(gt) as usize;
+    for tz in tz0..tz1 {
+        for tx in tx0..tx1 {
+            let x = (tx * 4) as f32;
+            let z = (tz * 4) as f32;
+            let (dx, dz) = (x + 2.0 - cam.x, z + 2.0 - cam.z);
+            if dx * dx + dz * dz > (r + 3.0) * (r + 3.0) {
+                continue;
+            }
+            let tex = match c.kind[tz * 4 * GW + tx * 4] {
+                0 => T_ASPHALT,
+                1 => T_SIDEWALK,
+                2 => T_CONCRETE,
+                _ => T_GRASS,
+            };
+            b.tquad(
+                tex,
+                [vec3(x, 0.0, z + 4.0), vec3(x + 4.0, 0.0, z + 4.0), vec3(x + 4.0, 0.0, z), vec3(x, 0.0, z)],
+                [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)],
+                WHITE,
+            );
+        }
+    }
+
+    // ---- road markings ----
+    let paint = Color::new(0.88, 0.86, 0.80, 1.0);
+    let ym = 0.06;
+    let mr = 60.0f32;
+    for rd in 0..=NB {
+        let base = (rd * P) as f32;
+        let along = |v: f32| (v - mr).max(0.0).div_euclid(4.0) * 4.0;
+        // centre dashes
+        if (base + 4.0 - cam.x).abs() < mr {
+            let mut z = along(cam.z);
+            while z < (cam.z + mr).min(GW as f32) {
+                let m = (z as usize) % P;
+                if m >= 10 && m <= 29 {
+                    flat(b, base + 3.9, z, 0.2, 2.4, ym, paint);
+                }
+                z += 4.0;
+            }
+        }
+        if (base + 4.0 - cam.z).abs() < mr {
+            let mut x = along(cam.x);
+            while x < (cam.x + mr).min(GW as f32) {
+                let m = (x as usize) % P;
+                if m >= 10 && m <= 29 {
+                    flat(b, x, base + 3.9, 2.4, 0.2, ym, paint);
+                }
+                x += 4.0;
+            }
+        }
+        // zebra crossings at both ends of each road segment
+        for seg in 0..NB {
+            let s0 = (seg * P + 8) as f32;
+            for zc in [s0 + 1.0, s0 + 21.0] {
+                if (base + 4.0 - cam.x).abs() < mr && (zc - cam.z).abs() < mr {
+                    for k in 0..7 {
+                        flat(b, base + 0.5 + k as f32, zc, 0.5, 1.5, ym, paint);
                     }
+                }
+                if (base + 4.0 - cam.z).abs() < mr && (zc - cam.x).abs() < mr {
+                    for k in 0..7 {
+                        flat(b, zc, base + 0.5 + k as f32, 1.5, 0.5, ym, paint);
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- buildings and street props ----
+    for p in &c.props {
+        match *p {
+            Prop::Building { x0, z0, x1, z1, h, style } => {
+                let dx = (x0 - cam.x).max(0.0).max(cam.x - x1);
+                let dz = (z0 - cam.z).max(0.0).max(cam.z - z1);
+                if dx * dx + dz * dz < 135.0 * 135.0 {
+                    b.fs = 70.0;
+                    b.fe = 130.0;
+                    draw_building(b, x0, z0, x1, z1, h, style, cam);
+                }
+            }
+            Prop::Tree { x, z, s } => {
+                if (x - cam.x).powi(2) + (z - cam.z).powi(2) < 85.0 * 85.0 {
+                    b.fs = 50.0;
+                    b.fe = 90.0;
+                    draw_tree(b, x, z, s);
+                }
+            }
+            Prop::Car { x, z, along_z, col } => {
+                if (x - cam.x).powi(2) + (z - cam.z).powi(2) < 85.0 * 85.0 {
+                    b.fs = 50.0;
+                    b.fe = 90.0;
+                    draw_car(b, x, z, along_z, col);
+                }
+            }
+            Prop::Crate { x, z } => {
+                if (x - cam.x).powi(2) + (z - cam.z).powi(2) < 85.0 * 85.0 {
+                    b.fs = 50.0;
+                    b.fe = 90.0;
+                    tcube(b, T_CRATE, vec3(x, CRATE_H * 0.5, z), 0.44, CRATE_H * 0.5, 0.44);
+                }
+            }
+            Prop::Lamp { x, z } => {
+                if (x - cam.x).powi(2) + (z - cam.z).powi(2) < 80.0 * 80.0 {
+                    b.fs = 50.0;
+                    b.fe = 90.0;
+                    b.aabb(vec3(x, 2.6, z), vec3(0.05, 2.6, 0.05), Color::new(0.22, 0.24, 0.26, 1.0));
+                    b.aabb(vec3(x, 5.25, z), vec3(0.22, 0.08, 0.22), Color::new(0.92, 0.88, 0.70, 1.0));
                 }
             }
         }
@@ -741,6 +1461,12 @@ fn draw_player(b: &mut Batch, g: &Game) {
 // ---------------------------------------------------------------------------
 #[macroquad::main("Marikina FPS")]
 async fn main() {
+    clear_background(Color::new(0.08, 0.10, 0.14, 1.0));
+    draw_text("Building city...", 30.0, screen_height() * 0.5, 40.0, WHITE);
+    next_frame().await;
+    let texs = make_textures();
+    let _ = city();
+
     let mut g = Game::new();
     let mut roles: HashMap<u64, Role> = HashMap::new();
     let mut last: HashMap<u64, Vec2> = HashMap::new();
@@ -753,6 +1479,8 @@ async fn main() {
     let mut sel: usize = 3;
     let mut win_pos: Option<Vec2> = None;
     let mut win_off = Vec2::ZERO;
+    let mut drag_off: HashMap<u64, Vec2> = HashMap::new();
+    let mut mouse_drag: Option<(usize, Vec2)> = None;
 
     loop {
         let dt = get_frame_time().min(0.05);
@@ -803,11 +1531,22 @@ async fn main() {
                         if title.contains(p) {
                             roles.insert(t.id, Role::Win);
                             win_off = p - wp;
+                        } else if screen == Screen::Edit && !Rect::new(wp.x, wp.y, ws.x, ws.y).contains(p) {
+                            // grab a button / the joystick to drag it anywhere
+                            if let Some(e) = ui.hit_any(p) {
+                                sel = e as usize;
+                                roles.insert(t.id, Role::Drag);
+                                drag_off.insert(t.id, ui.pads[sel].c - p);
+                            }
                         }
                     }
                     TouchPhase::Moved => {
                         if roles.get(&t.id) == Some(&Role::Win) {
                             win_pos = Some(p - win_off);
+                        } else if roles.get(&t.id) == Some(&Role::Drag) {
+                            if let Some(off) = drag_off.get(&t.id) {
+                                ui.place(sel, p + *off, &mut cfg);
+                            }
                         }
                     }
                     TouchPhase::Ended | TouchPhase::Cancelled => {
@@ -874,7 +1613,7 @@ async fn main() {
                     Some(Elem::Snk) => snk_held = true,
                     _ => {}
                 },
-                Role::Win => {}
+                Role::Win | Role::Drag => {}
             }
         }
 
@@ -888,6 +1627,25 @@ async fn main() {
                 }
             } else {
                 taps.push(mp);
+            }
+        }
+
+        // Mouse drag of HUD elements (desktop editor)
+        if !mobile && screen == Screen::Edit {
+            let (mx, my) = mouse_position();
+            let mp = vec2(mx, my);
+            if is_mouse_button_pressed(MouseButton::Left) && !Rect::new(wp.x, wp.y, ws.x, ws.y).contains(mp) {
+                if let Some(e) = ui.hit_any(mp) {
+                    sel = e as usize;
+                    mouse_drag = Some((sel, ui.pads[sel].c - mp));
+                }
+            }
+            if is_mouse_button_down(MouseButton::Left) {
+                if let Some((i, off)) = mouse_drag {
+                    ui.place(i, mp + off, &mut cfg);
+                }
+            } else {
+                mouse_drag = None;
             }
         }
 
@@ -1004,16 +1762,16 @@ async fn main() {
                         cfg[sel].opacity = (((cfg[sel].opacity + 0.1) * 10.0).round() / 10.0).min(1.0);
                     }
                     if tapped(btn(3, 150.0, 56.0)) {
-                        cfg[sel].dx = (cfg[sel].dx - NUDGE).max(-1500.0);
+                        cfg[sel].dx = (cfg[sel].dx - NUDGE).max(-3000.0);
                     }
                     if tapped(btn(3, 214.0, 56.0)) {
-                        cfg[sel].dy = (cfg[sel].dy - NUDGE).max(-1500.0);
+                        cfg[sel].dy = (cfg[sel].dy - NUDGE).max(-3000.0);
                     }
                     if tapped(btn(3, 278.0, 56.0)) {
-                        cfg[sel].dy = (cfg[sel].dy + NUDGE).min(1500.0);
+                        cfg[sel].dy = (cfg[sel].dy + NUDGE).min(3000.0);
                     }
                     if tapped(btn(3, 342.0, 56.0)) {
-                        cfg[sel].dx = (cfg[sel].dx + NUDGE).min(1500.0);
+                        cfg[sel].dx = (cfg[sel].dx + NUDGE).min(3000.0);
                     }
                     if tapped(btn(4, 12.0, 190.0)) {
                         cfg[sel] = ElemCfg::new();
@@ -1148,7 +1906,26 @@ async fn main() {
         }
 
         // ------------------------------------------------------------ render
-        clear_background(Color::new(0.36, 0.52, 0.66, 1.0));
+        clear_background(Color::new(0.76, 0.82, 0.88, 1.0));
+        {
+            let hz = (h * 0.5 + g.pitch * h * 0.9).clamp(h * 0.1, h);
+            let top = [0.28f32, 0.46, 0.74];
+            let haze = [0.76f32, 0.82, 0.88];
+            let n = 24;
+            for i in 0..n {
+                let t0 = i as f32 / n as f32;
+                let y0 = hz * t0;
+                let y1 = hz * (i + 1) as f32 / n as f32;
+                let k = t0.powf(1.6);
+                let c = Color::new(
+                    top[0] + (haze[0] - top[0]) * k,
+                    top[1] + (haze[1] - top[1]) * k,
+                    top[2] + (haze[2] - top[2]) * k,
+                    1.0,
+                );
+                draw_rectangle(0.0, y0, w, y1 - y0 + 1.0, c);
+            }
+        }
 
         let cam = g.cam_pos();
         let d = g.aim_dir();
@@ -1160,13 +1937,17 @@ async fn main() {
             ..Default::default()
         });
 
-        let mut b = Batch::new();
-        draw_world(&mut b);
+        let mut b = Batch::new(texs.clone(), cam);
+        draw_city(&mut b, cam);
+        b.fs = 50.0;
+        b.fe = 95.0;
         for tg in &g.targets {
-            if tg.alive {
+            if tg.alive && (tg.x - g.x).abs() < 95.0 && (tg.z - g.z).abs() < 95.0 {
                 draw_target(&mut b, tg, g.x, g.z);
             }
         }
+        b.fs = 1.0e6;
+        b.fe = 2.0e6;
         draw_player(&mut b, &g);
         if let Some((_, end)) = g.tracer {
             if g.tracer_t > 0.0 {
@@ -1217,7 +1998,7 @@ async fn main() {
         }
 
         let pad = 14.0 * u;
-        draw_text("RUSTY FPS  /  TRAINING YARD", pad, 27.0 * u, 22.0 * u, WHITE);
+        draw_text("MARIKINA FPS  /  CITY", pad, 27.0 * u, 22.0 * u, WHITE);
         draw_text(
             &format!("HP {}     {} / {}", g.health, g.ammo, g.reserve),
             pad,
@@ -1281,7 +2062,7 @@ async fn main() {
                     ui_button(btn(2, 12.0, 406.0), "CLOSE", false, u);
                 }
                 Screen::Edit => {
-                    draw_text("HUD EDITOR   (drag here to move)", wp.x + 12.0 * u, wp.y + 25.0 * u, 18.0 * u, WHITE);
+                    draw_text("HUD EDITOR  (drag buttons anywhere)", wp.x + 12.0 * u, wp.y + 25.0 * u, 18.0 * u, WHITE);
                     ui_button(btn(0, 12.0, 56.0), "<", false, u);
                     ui_button(btn(0, 362.0, 56.0), ">", false, u);
                     draw_center(ELEMS[sel].name(), wp.x + 215.0 * u, row_y(0) + 23.0 * u, 22.0 * u, WHITE);
