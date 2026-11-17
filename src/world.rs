@@ -439,8 +439,9 @@ pub fn build_world() -> World {
         let col = Color::new(raw[36] as f32 / 255.0, raw[37] as f32 / 255.0, raw[38] as f32 / 255.0, raw[39] as f32 / 255.0);
         let vertex = |n: usize| SV { p: vec3(f(n), f(n + 1), f(n + 2)), uv: white_uv, c: col };
         let a = vertex(0);
+        let m = vertex(3);
         let c = vertex(6);
-        b.push(&Quad { v: [a, vertex(3), c, c], n: Vec3::ZERO, tile: T_WHITE });
+        b.push([a.p, m.p, c.p, c.p], Vec3::ZERO, [white_uv; 4], T_WHITE, [col; 4]);
     }
     for line in include_str!("../assets/dockyard/dockyard-collisions.txt").lines() {
         let values: Vec<f32> = line.split(',').filter_map(|v| v.parse().ok()).collect();
