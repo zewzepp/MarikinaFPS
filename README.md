@@ -1,6 +1,6 @@
-# Marikina City FPS
+# Marikina FPS
 
-A third-person shooter sketch in Rust (macroquad 3D) set in a 200 x 200 m city: avenues with zebra crossings and parked cars, office towers, shop rows, houses, parks with a basketball court, a plaza fountain and a street market. Pedestrian targets patrol the roads.
+A compact 3D cargo yard shooter built with Rust and Macroquad. The playable arena is 52 × 52 m, with staggered cargo-container walls around the outside, collision bounds along the edges, 5 red AI opponents, and 4 blue teammates. The map reuses the supplied ResoForge low-poly asset; its attribution is in `assets/dockyard/ATTRIBUTION.txt`.
 
 ## Run it
 
@@ -8,25 +8,17 @@ A third-person shooter sketch in Rust (macroquad 3D) set in a 200 x 200 m city: 
 cargo run --release
 ```
 
-## What's new
-
-- **Vast city map** instead of the training yard (36 blocks, textured facades, sky, sun, clouds, distance fog, baked lighting).
-- **Character physics**: momentum with acceleration and friction, gravity, step-up on curbs, wall sliding, landing impact and camera dip, air control. Targets are knocked into ragdoll pieces that tumble and bounce; shell casings and sparks have physics too.
-- **No backward slide**: sprint and slide only work with the stick pushed forward. Walking backward is slower. A slide ends if you turn around.
-- **Drag to place buttons**: Settings > Customize HUD, then drag any button (or the joystick) anywhere on screen. The nudge arrows are only for fine tuning. Positions are stored as screen fractions so they survive rotation.
-- **Better scope**: first-person lens view, 2x-9x magnification (+/- pads on touch, Q/E or mouse wheel on desktop), breathing sway (steadier when crouched), mil-dot reticle, range finder, lens vignette.
-- **Sound FX**: gunshot, dry fire, reload, footsteps, jump, landing, slide, hit marker, headshot ding, bullet impact, scope click, shell casings, city ambience. All synthesized at runtime (no asset files). Volume in Settings.
-- Mini-map, headshot detection.
-
 ## Controls
 
-- **Touch:** floating joystick on the left, drag the right side to look. Fire (hold), Jump, Rel, Scope, Snk/Slide. Push the stick fully forward to run; the Snk button becomes Slide.
-- **Desktop:** WASD move, Shift run, hold right mouse to look, left mouse fire, Space jump, R reload, F scope, Q/E or wheel scope zoom, C sneak/slide, Ctrl sneak, Esc quit.
+- **Desktop:** WASD move, Shift sprint, hold right mouse to look, left mouse fire, V switch rifle/knife, Space jump, R reload, F aim, Q/E or mouse wheel adjust magnification, C sneak/slide, Ctrl sneak, Esc quit.
+- **Touch:** floating joystick on the left, drag the right side to look. Fire, Jump, Rel, Scope and Snk/Slide are on-screen controls. Use the weapon button at the bottom to switch rifle/knife.
+- Push the stick fully forward or hold Shift to run. The Snk button becomes Slide while sprinting.
+- Settings > Customize HUD lets you drag and scale touch controls.
 
 ## Android APK
 
-Same GitHub Actions workflow as before (`.github/workflows/android-apk.yml`).
+The GitHub Actions workflow is `.github/workflows/android-apk.yml`.
 
 ## License
 
-MIT
+The game source is MIT licensed. The included low-poly map asset retains its separate CC-BY-4.0 attribution in `assets/dockyard/ATTRIBUTION.txt`.

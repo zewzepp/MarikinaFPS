@@ -15,6 +15,12 @@ pub const MAG: i32 = 30;
 pub const MAX_DIST: f32 = 150.0;
 pub const SPRINT_TILT: f32 = 0.9;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Team { Blue, Red }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Weapon { Rifle, Knife }
+
 #[derive(Default, Clone, Copy)]
 pub struct Input {
     pub mv: Vec2,
@@ -24,6 +30,7 @@ pub struct Input {
     pub ctrl: bool,
     pub jump: bool,
     pub fire: bool,
+    pub switch_weapon: bool,
     pub reload: bool,
     pub scope_tap: bool,
     pub snk_tap: bool,
@@ -33,6 +40,10 @@ pub struct Input {
 }
 
 pub struct Target {
+    pub team: Team,
+    pub hp: i32,
+    pub fire_cd: f32,
+    pub muzzle_flash: f32,
     pub x: f32,
     pub z: f32,
     pub vx: f32,
@@ -67,7 +78,7 @@ fn pick(list: &[[f32; 3]], r: f32) -> Color {
 }
 
 impl Target {
-    fn new(x: f32, z: f32, k: usize) -> Self {
+    fn new(x: f32, z: f32, k: usize, enemy: bool) -> Self {
         use crate::tex::hash;
         let h = |n: u32| hash(k as i32 * 7 + 3, n as i32, 4141 + n);
         let skins = [[0.93, 0.74, 0.58], [0.84, 0.60, 0.40], [0.72, 0.50, 0.32], [0.58, 0.38, 0.24], [0.96, 0.80, 0.66]];
@@ -86,7 +97,12 @@ impl Target {
         ];
         let pants = [[0.20, 0.28, 0.46], [0.10, 0.10, 0.12], [0.58, 0.50, 0.36], [0.28, 0.29, 0.32], [0.30, 0.34, 0.20]];
         let shoes = [[0.08, 0.08, 0.09], [0.38, 0.22, 0.12], [0.92, 0.92, 0.90], [0.70, 0.15, 0.12], [0.55, 0.36, 0.20]];
+        let team = if enemy { Team::Red } else { Team::Blue };
         Self {
+            team,
+            hp: 100,
+            fire_cd: 0.4 + h(16) * 1.4,
+            muzzle_flash: 0.0,
             x,
             z,
             vx: 0.0,
@@ -103,7 +119,7 @@ impl Target {
             walk: h(4) * 20.0,
             skin: pick(&skins, h(5)),
             hair: pick(&hairs, h(6)),
-            shirt: pick(&shirts, h(7)),
+            shirt: if enemy { Color::new(0.72, 0.12, 0.10, 1.0) } else { Color::new(0.10, 0.34, 0.78, 1.0) },
             pants: pick(&pants, h(8)),
             shoes: pick(&shoes, h(9)),
             accent: pick(&shirts, h(10)),
@@ -266,6 +282,8 @@ pub struct Game {
     pub boost: f32,
     pub mag: f32,
     pub ammo: i32,
+    pub health: i32,
+    pub weapon: Weapon,
     pub reserve: i32,
     pub reloading: f32,
     pub fire_cd: f32,
@@ -320,22 +338,24 @@ fn samples(x: f32, z: f32) -> [(f32, f32); 9] {
 
 impl Game {
     pub fn new(w: &World) -> Self {
-        let targets = w.spawns.iter().enumerate().map(|(k, s)| Target::new(s.0, s.1, k)).collect();
+        let targets = w.spawns.iter().enumerate().map(|(k, s)| Target::new(s.0, s.1, k, s.2)).collect();
         Self {
             x: SIZE * 0.5,
             y: 0.0,
-            z: SIZE * 0.5 + 2.0,
+            z: 6.0,
             ys: 0.0,
             vel: Vec2::ZERO,
             vy: 0.0,
             grounded: true,
-            yaw: -std::f32::consts::FRAC_PI_2,
+            yaw: std::f32::consts::FRAC_PI_2,
             pitch: 0.0,
             sway: Vec2::ZERO,
             zoom: 0.0,
             boost: 0.0,
             mag: 4.0,
             ammo: MAG,
+            health: 100,
+            weapon: Weapon::Rifle,
             reserve: 120,
             reloading: 0.0,
             fire_cd: 0.0,
@@ -390,6 +410,10 @@ impl Game {
     }
 
     fn blocked(&self, w: &World, x: f32, z: f32) -> bool {
+        // Invisible collision planes keep the player inside the compact arena.
+        if x < PR || z < PR || x > SIZE - PR || z > SIZE - PR {
+            return true;
+        }
         samples(x, z).iter().any(|(sx, sz)| hh(w, &self.props, *sx, *sz) > self.y + STEP)
     }
 
@@ -482,7 +506,7 @@ impl Game {
             }
             if p.y < 1.95 {
                 for (i, tg) in self.targets.iter().enumerate() {
-                    if !tg.alive {
+                    if !tg.alive || tg.team == Team::Blue {
                         continue;
                     }
                     let dx = p.x - tg.x;
@@ -725,6 +749,22 @@ impl Game {
         if self.fire_cd > 0.0 || self.reloading > 0.0 {
             return;
         }
+        if self.weapon == Weapon::Knife {
+            self.fire_cd = 0.42;
+            self.ev.push((Snd::Clang, 0.25));
+            let f = vec2(self.yaw.cos(), self.yaw.sin());
+            let mut best: Option<(usize, f32)> = None;
+            for (idx, bot) in self.targets.iter().enumerate() {
+                if !bot.alive || bot.team != Team::Red { continue; }
+                let delta = vec2(bot.x - self.x, bot.z - self.z);
+                let dist = delta.length();
+                if dist <= 2.2 && dist > 0.01 && delta.normalize().dot(f) > 0.25 && best.map_or(true, |(_, d)| dist < d) {
+                    best = Some((idx, dist));
+                }
+            }
+            if let Some((idx, _)) = best { self.kill_target(idx, vec3(f.x, 0.0, f.y), false); }
+            return;
+        }
         if self.ammo <= 0 {
             self.fire_cd = 0.3;
             if self.reserve > 0 {
@@ -791,8 +831,13 @@ impl Game {
 
     pub fn update(&mut self, w: &World, i: &Input, dt: f32) {
         self.t += dt;
+        if i.switch_weapon {
+            self.weapon = if self.weapon == Weapon::Rifle { Weapon::Knife } else { Weapon::Rifle };
+            if self.weapon == Weapon::Knife { self.scoped = false; self.zoom = 0.0; }
+            self.ev.push((Snd::Ui, 0.65));
+        }
         if i.scope_tap {
-            self.scoped = !self.scoped;
+            if self.weapon == Weapon::Rifle { self.scoped = !self.scoped; }
             self.ev.push((Snd::Scope, 0.5));
         }
         if i.zoom_step != 0 {
@@ -1024,87 +1069,68 @@ impl Game {
 
     fn update_targets(&mut self, w: &World, dt: f32) {
         use std::f32::consts::PI;
+        let player_pos = vec2(self.x, self.z);
         for i in 0..self.targets.len() {
             let (r1, r2, r3) = (self.rf(), self.rf(), self.rf());
-            let t = &mut self.targets[i];
-            if !t.alive {
-                t.respawn -= dt;
-                if t.respawn <= 0.0 {
-                    t.alive = true;
-                    t.x = t.x0;
-                    t.z = t.z0;
-                    t.vx = 0.0;
-                    t.vz = 0.0;
-                    t.hd = r1 * TAU;
-                    t.timer = 0.5 + r2;
-                    t.idle = 0.0;
-                }
+            let (team, alive, pos, home, fire_cd) = {
+                let t=&self.targets[i]; (t.team,t.alive,vec2(t.x,t.z),vec2(t.x0,t.z0),t.fire_cd)
+            };
+            if !alive {
+                let t=&mut self.targets[i]; t.respawn-=dt;
+                if t.respawn<=0.0 { t.alive=true; t.hp=100; t.x=t.x0; t.z=t.z0; t.vx=0.0; t.vz=0.0; t.hd=r1*TAU; t.timer=0.5+r2; t.idle=0.0; }
                 continue;
             }
-            // random decisions: stand around, wander off in a new direction, change pace
-            t.timer -= dt;
-            if t.idle > 0.0 {
-                t.idle -= dt;
-            }
-            if t.timer <= 0.0 {
-                if r1 < 0.22 {
-                    t.idle = 0.8 + r2 * 2.2;
-                    t.timer = t.idle + 0.2;
-                } else {
-                    t.hd += (r2 - 0.5) * 2.6;
-                    t.spd = if r3 < 0.18 { 2.4 + r2 * 0.8 } else { 0.8 + r3 * 0.9 };
-                    t.timer = 1.2 + r3 * 3.5;
-                }
-            }
-            // do not drift too far from home: curve back
-            let hx = t.x0 - t.x;
-            let hz = t.z0 - t.z;
-            if hx * hx + hz * hz > 26.0 * 26.0 {
-                let mut dh = hz.atan2(hx) - t.hd;
-                while dh > PI {
-                    dh -= TAU;
-                }
-                while dh < -PI {
-                    dh += TAU;
-                }
-                t.hd += dh * (dt * 2.0).min(1.0);
-            }
-            // look ahead: turn away from walls, cars, trees, buildings
-            let (c, sn) = (t.hd.cos(), t.hd.sin());
-            if hh(w, &self.props, t.x + c * 0.9, t.z + sn * 0.9) > 0.3 {
-                t.hd += PI * (0.55 + r2 * 0.9) * if r1 < 0.5 { 1.0 } else { -1.0 };
-                t.timer = 0.8 + r3;
-                t.idle = 0.0;
-            }
-            let go = if t.idle > 0.0 { 0.0 } else { t.spd };
-            let gx = t.hd.cos() * go;
-            let gz = t.hd.sin() * go;
-            t.vx += (gx - t.vx) * (dt * 4.0).min(1.0);
-            t.vz += (gz - t.vz) * (dt * 4.0).min(1.0);
-            let nx = t.x + t.vx * dt;
-            let nz = t.z + t.vz * dt;
-            if hh(w, &self.props, nx, nz) <= 0.3 {
-                t.x = nx;
-                t.z = nz;
+            let mut target: Option<(usize, Vec2, f32)> = None;
+            if team == Team::Red {
+                let d=player_pos.distance(pos); target=Some((usize::MAX,player_pos,d));
             } else {
-                t.vx = 0.0;
-                t.vz = 0.0;
-                t.hd += PI * 0.7;
-            }
-            let sp = (t.vx * t.vx + t.vz * t.vz).sqrt();
-            t.walk += sp * dt * 2.6;
-            if sp > 0.25 {
-                let want = t.vz.atan2(t.vx);
-                let mut dy = want - t.yaw;
-                while dy > PI {
-                    dy -= TAU;
+                for (j, other) in self.targets.iter().enumerate() {
+                    if other.alive && other.team==Team::Red {
+                        let p=vec2(other.x,other.z); let d=p.distance(pos);
+                        if target.map_or(true,|(_,_,best)| d<best) { target=Some((j,p,d)); }
+                    }
                 }
-                while dy < -PI {
-                    dy += TAU;
-                }
-                t.yaw += dy * (dt * 6.0).min(1.0);
             }
+            let mut fire_at: Option<(usize, Vec2, f32)> = None;
+            let mut desired_heading=None;
+            let mut facing_heading=None;
+            if let Some((j,aim,distance))=target {
+                let delta=aim-pos;
+                let angle=delta.y.atan2(delta.x);
+                facing_heading=Some(angle);
+                desired_heading=Some(if distance>11.0 {angle} else {angle+PI*0.5*(if i%2==0{1.0}else{-1.0})});
+                if distance<34.0 && fire_cd<=dt {
+                    let from=vec3(pos.x,1.25,pos.y); let to=vec3(aim.x,1.0,aim.y);
+                    let dist=(to-from).length(); let steps=(dist*4.0).ceil() as i32;
+                    let visible=(1..steps).all(|step| {let p=from.lerp(to,step as f32/steps.max(1) as f32); w.height_at(p.x,p.z)<=p.y});
+                    if visible { fire_at=Some((j,aim,distance)); }
+                }
+            }
+            let mut hit_player=false;
+            let mut hit_bot=None;
+            {
+            let t=&mut self.targets[i];
+            t.fire_cd=(t.fire_cd-dt).max(0.0); t.timer-=dt; if t.idle>0.0 {t.idle-=dt;}
+            if let Some(hd)=desired_heading {t.hd=hd; t.spd=if target.unwrap().2>11.0 {2.1} else {0.9};}
+            if let Some(face)=facing_heading {t.yaw=face;}
+            else if t.timer<=0.0 {t.hd+=(r2-0.5)*2.6; t.spd=0.8+r3*1.2; t.timer=1.2+r3*3.5;}
+            let hx=home.x-t.x; let hz=home.y-t.z;
+            if hx*hx+hz*hz>25.0*25.0 {t.hd=(hz.atan2(hx));}
+            let (c,sn)=(t.hd.cos(),t.hd.sin());
+            if hh(w,&self.props,t.x+c*0.9,t.z+sn*0.9)>0.3 {t.hd+=PI*(0.55+r2*0.9)*if r1<0.5{1.0}else{-1.0};t.timer=0.8+r3;}
+            let go=if t.idle>0.0 {0.0}else{t.spd}; let gx=t.hd.cos()*go; let gz=t.hd.sin()*go;
+            t.vx+=(gx-t.vx)*(dt*4.0).min(1.0); t.vz+=(gz-t.vz)*(dt*4.0).min(1.0);
+            let nx=t.x+t.vx*dt; let nz=t.z+t.vz*dt;
+            if nx>PR && nz>PR && nx<SIZE-PR && nz<SIZE-PR && hh(w,&self.props,nx,nz)<=0.3 {t.x=nx;t.z=nz;} else {t.vx=0.0;t.vz=0.0;t.hd+=PI*0.7;}
+            let sp=(t.vx*t.vx+t.vz*t.vz).sqrt();t.walk+=sp*dt*2.6;
+            if facing_heading.is_none() && sp>0.25 {t.yaw=t.vz.atan2(t.vx);}
+            if let Some((j,aim,_))=fire_at { t.fire_cd=0.8+r1*0.6; t.muzzle_flash=0.08; t.yaw=(aim.y-t.z).atan2(aim.x-t.x); if j==usize::MAX {hit_player=true;} else {hit_bot=Some(j);} }
+            t.muzzle_flash=(t.muzzle_flash-dt).max(0.0);
+            }
+            if hit_player { self.health=(self.health-6).max(0); self.hit_t=0.08; }
+            if let Some(j)=hit_bot { let other=&mut self.targets[j]; other.hp-=14; if other.hp<=0 { other.alive=false; other.respawn=6.0; } }
         }
+        if self.health<=0 {self.health=100;self.x=SIZE*0.5;self.z=6.0;self.vel=Vec2::ZERO;}
     }
 
     fn update_debris(&mut self, w: &World, dt: f32) {

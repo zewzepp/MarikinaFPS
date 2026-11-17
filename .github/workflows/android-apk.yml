@@ -2,6 +2,8 @@ name: Android APK
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, master]
 
 jobs:
   build-apk:
@@ -13,7 +15,7 @@ jobs:
           targets: aarch64-linux-android
       - uses: android-actions/setup-android@v4
       - name: Install Android SDK and NDK packages
-        run: sdkmanager "platforms;android-30" "build-tools;30.0.3" "ndk;27.2.12479018"
+        run: sdkmanager "platforms;android-29" "build-tools;29.0.3" "ndk;27.2.12479018"
       - name: Set Android NDK path
         run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
       - name: Install cargo-quad-apk

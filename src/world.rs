@@ -4,13 +4,13 @@ use macroquad::prelude::*;
 use std::collections::HashMap;
 
 pub const ROAD: f32 = 8.0;
-pub const PERIOD: f32 = 32.0;
-pub const NB: usize = 4;
-pub const SIZE: f32 = NB as f32 * PERIOD + ROAD; // 136 x 136 units
+pub const PERIOD: f32 = 44.0;
+pub const NB: usize = 1;
+pub const SIZE: f32 = 52.0; // compact cargo arena
 pub const CURB: f32 = 0.12;
 const CH: f32 = 32.0;
 pub const GC: f32 = 8.0;
-pub const GN: usize = NB * 4 + 1;
+pub const GN: usize = 7;
 
 #[derive(Clone, Copy)]
 pub struct BoxC {
@@ -47,7 +47,7 @@ pub struct World {
     pub boxes: Vec<BoxC>,
     grid: Vec<Vec<usize>>,
     pub chunks: Vec<Chunk>,
-    pub spawns: Vec<(f32, f32, bool)>, // x, z, patrols along x
+    pub spawns: Vec<(f32, f32, bool)>, // x, z, enemy team
     pub props: Vec<PropSpawn>,
 }
 
@@ -431,19 +431,39 @@ impl B {
 
 pub fn build_world() -> World {
     let mut b = B { q: HashMap::new(), boxes: Vec::new(), spawns: Vec::new(), props: Vec::new() };
-    b.roads();
-    for bi in 0..NB {
-        for bj in 0..NB {
-            b.block(bi, bj);
+    let data = include_bytes!("../assets/dockyard/dockyard.meshbin");
+    let triangles = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let white_uv = tile_uv(T_WHITE, 0.5, 0.5);
+    for raw in data[4..].chunks_exact(40).take(triangles) {
+        let f = |n: usize| f32::from_le_bytes([raw[n], raw[n + 1], raw[n + 2], raw[n + 3]]);
+        let col = Color::new(raw[36] as f32 / 255.0, raw[37] as f32 / 255.0, raw[38] as f32 / 255.0, raw[39] as f32 / 255.0);
+        let vertex = |n: usize| SV { p: vec3(f(n), f(n + 1), f(n + 2)), uv: white_uv, c: col };
+        let a = vertex(0);
+        let c = vertex(6);
+        b.push(&Quad { v: [a, vertex(3), c, c], n: Vec3::ZERO, tile: T_WHITE });
+    }
+    for line in include_str!("../assets/dockyard/dockyard-collisions.txt").lines() {
+        let values: Vec<f32> = line.split(',').filter_map(|v| v.parse().ok()).collect();
+        if values.len() == 5 {
+            b.solid(values[0], values[1], values[2], values[3], values[4]);
         }
     }
-    // perimeter wall (inner faces)
-    let wc = tint(0.8, 0.8, 0.78);
-    let s = SIZE;
-    b.wall(0.0, 0.0, s, 0.0, 0.0, 9.0, T_CONCRETE, wc, vec3(0.0, 0.0, 1.0));
-    b.wall(s, s, 0.0, s, 0.0, 9.0, T_CONCRETE, wc, vec3(0.0, 0.0, -1.0));
-    b.wall(0.0, s, 0.0, 0.0, 0.0, 9.0, T_CONCRETE, wc, vec3(1.0, 0.0, 0.0));
-    b.wall(s, 0.0, s, s, 0.0, 9.0, T_CONCRETE, wc, vec3(-1.0, 0.0, 0.0));
+
+    // Invisible wall-foot bounds follow the cargo perimeter and join at corners.
+    // The player radius is handled by movement collision, so the planes stay flush
+    // with the 52 m arena edge without creating visible geometry.
+    let edge = 1.25;
+    let wall_height = 8.0;
+    b.solid(0.0, 0.0, edge, SIZE, wall_height);
+    b.solid(SIZE - edge, 0.0, SIZE, SIZE, wall_height);
+    b.solid(0.0, 0.0, SIZE, edge, wall_height);
+    b.solid(0.0, SIZE - edge, SIZE, SIZE, wall_height);
+
+    // Five armed red bots, plus four blue teammates beside the player spawn.
+    let blue = [(23.1, 6.0), (24.7, 6.0), (27.3, 6.0), (28.9, 6.0)];
+    for (x, z) in blue { b.spawns.push((x, z, false)); }
+    let red = [(23.1, 46.0), (24.7, 46.0), (26.0, 46.0), (27.3, 46.0), (28.9, 46.0)];
+    for (x, z) in red { b.spawns.push((x, z, true)); }
 
     let mut grid: Vec<Vec<usize>> = vec![Vec::new(); GN * GN];
     for (i, bx) in b.boxes.iter().enumerate() {

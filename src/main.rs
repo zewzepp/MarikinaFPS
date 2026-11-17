@@ -90,6 +90,7 @@ async fn main() {
         let title = Rect::new(wp.x, wp.y, ws.x, 36.0 * u);
         let win_rect = Rect::new(wp.x, wp.y, ws.x, ws.y);
         let zp = zoom_pads(w, h, u);
+        let weapon_rect = Rect::new(w * 0.5 - 54.0 * u, h - 58.0 * u, 108.0 * u, 38.0 * u);
 
         let mut mv = Vec2::ZERO; // x = strafe right, y = forward
         let mut look = Vec2::ZERO;
@@ -98,6 +99,7 @@ async fn main() {
         let mut jump = false;
         let mut reload = false;
         let mut scope_tap = false;
+        let mut switch_weapon = false;
         let mut snk_tap = false;
         let mut snk_held = false;
         let mut open_settings = false;
@@ -146,6 +148,9 @@ async fn main() {
                 TouchPhase::Started => {
                     let role = if ui.settings_hit(p) {
                         open_settings = true;
+                        Role::Btn
+                    } else if weapon_rect.contains(p) {
+                        switch_weapon = true;
                         Role::Btn
                     } else if let Some(e) = ui.hit(p) {
                         match e {
@@ -233,6 +238,8 @@ async fn main() {
                 if screen == Screen::Play {
                     if ui.settings_hit(mp) {
                         open_settings = true;
+                    } else if weapon_rect.contains(mp) {
+                        switch_weapon = true;
                     }
                 } else {
                     taps.push(mp);
@@ -282,6 +289,9 @@ async fn main() {
             if is_key_pressed(KeyCode::R) {
                 reload = true;
             }
+            if is_key_pressed(KeyCode::V) {
+                switch_weapon = true;
+            }
             if is_key_pressed(KeyCode::F) {
                 scope_tap = true;
             }
@@ -328,6 +338,7 @@ async fn main() {
             jump = false;
             reload = false;
             scope_tap = false;
+            switch_weapon = false;
             snk_tap = false;
             snk_held = false;
             kb_sprint = false;
@@ -465,6 +476,7 @@ async fn main() {
             ctrl,
             jump,
             fire,
+            switch_weapon,
             reload,
             scope_tap,
             snk_tap,
@@ -564,7 +576,7 @@ async fn main() {
             Color::new(0.82, 0.88, 0.92, 1.0),
         );
         if g.zoom < 0.5 {
-            render::draw_minimap(&g, pad, 94.0 * u, 110.0 * u);
+            render::draw_minimap(&g, &city, pad, 94.0 * u, 110.0 * u);
         }
         if g.reloading > 0.0 {
             ui::draw_center("RELOADING...", cx, cy + h * 0.22, 26.0 * u, WHITE);
@@ -586,6 +598,12 @@ async fn main() {
                 draw_pad(&zp[0], "+", false, u);
                 draw_pad(&zp[1], "-", false, u);
             }
+        }
+        if screen == Screen::Play {
+            let weapon_label = if g.weapon == Weapon::Rifle { "RIFLE  [V]" } else { "KNIFE  [V]" };
+            draw_rectangle(weapon_rect.x, weapon_rect.y, weapon_rect.w, weapon_rect.h, Color::new(0.04, 0.08, 0.12, 0.72));
+            draw_rectangle_lines(weapon_rect.x, weapon_rect.y, weapon_rect.w, weapon_rect.h, 1.5 * u, Color::new(0.8, 0.92, 1.0, 0.75));
+            ui::draw_center(weapon_label, weapon_rect.x + weapon_rect.w * 0.5, weapon_rect.y + weapon_rect.h * 0.5, 15.0 * u, WHITE);
         }
         if screen == Screen::Edit {
             let p = &ui.pads[sel];

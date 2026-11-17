@@ -139,6 +139,14 @@ pub fn draw_target(b: &mut Batch, tg: &Target) {
             b.obox(root - f * 0.01, yaw, 0.014, 0.014, 0.014, tg.accent);
         }
     }
+    // Compact service rifle held at chest height so every combat bot reads as armed.
+    let rifle = p + up * (ty + 0.02) + f * 0.20 + r * 0.12;
+    let weapon = Color::new(0.10, 0.12, 0.13, 1.0);
+    let metal = Color::new(0.31, 0.34, 0.34, 1.0);
+    b.obox(rifle, yaw, 0.22, 0.035, 0.035, weapon);
+    b.obox(rifle + f * 0.22, yaw, 0.12, 0.022, 0.022, metal);
+    b.obox(rifle - f * 0.17 - up * 0.055, yaw, 0.075, 0.065, 0.027, dark(tg.accent, 0.75));
+    b.obox(rifle - f * 0.02 - up * 0.075, yaw, 0.035, 0.075, 0.025, weapon);
     b.clear_xform();
 }
 
@@ -329,12 +337,19 @@ pub fn draw_player(b: &mut Batch, g: &Game, w: &World) {
     b.obox(head + f * 0.088, yaw, 0.01, 0.03, 0.075, visor);
 
     let gc = g.gun_model();
-    b.boxed(gc, d * 0.17, u2 * 0.035, r * 0.03, gun_dark);
-    b.boxed(gc + d * 0.17, d * 0.07, u2 * 0.028, r * 0.026, gun_mid);
-    b.boxed(gc + d * 0.31, d * 0.10, u2 * 0.013, r * 0.013, gun_dark);
-    b.boxed(gc - d * 0.22, d * 0.08, u2 * 0.035, r * 0.025, gun_wood);
-    b.boxed(gc + d * 0.03 - u2 * 0.075, d * 0.02, u2 * 0.05, r * 0.02, gun_dark);
-    b.boxed(gc + u2 * 0.05 + d * 0.04, d * 0.05, u2 * 0.015, r * 0.012, gun_dark);
+    if g.weapon == Weapon::Rifle {
+        b.boxed(gc, d * 0.17, u2 * 0.035, r * 0.03, gun_dark);
+        b.boxed(gc + d * 0.17, d * 0.07, u2 * 0.028, r * 0.026, gun_mid);
+        b.boxed(gc + d * 0.31, d * 0.10, u2 * 0.013, r * 0.013, gun_dark);
+        b.boxed(gc - d * 0.22, d * 0.08, u2 * 0.035, r * 0.025, gun_wood);
+        b.boxed(gc + d * 0.03 - u2 * 0.075, d * 0.02, u2 * 0.05, r * 0.02, gun_dark);
+        b.boxed(gc + u2 * 0.05 + d * 0.04, d * 0.05, u2 * 0.015, r * 0.012, gun_dark);
+    } else {
+        let grip = gc - d * 0.10;
+        b.boxed(grip, d * 0.07, u2 * 0.025, r * 0.025, gun_dark);
+        b.boxed(gc + d * 0.13, d * 0.16, u2 * 0.012, r * 0.018, Color::new(0.72, 0.78, 0.78, 1.0));
+        b.boxed(gc + d * 0.22, d * 0.04, u2 * 0.025, r * 0.025, gun_mid);
+    }
 
     let sh_r = hip + dir_t * (0.34 * kb) + r * 0.24;
     let sh_l = hip + dir_t * (0.34 * kb) - r * 0.24;
@@ -390,69 +405,39 @@ pub fn draw_scope(g: &Game, w: f32, h: f32, u: f32) {
     if g.zoom < 0.35 {
         return;
     }
-    let a = ((g.zoom - 0.35) / 0.65).clamp(0.0, 1.0);
     let cx = w * 0.5;
     let cy = h * 0.5;
-    let s = h.min(w) * 0.92;
-    let rad = s * 0.5;
-    let x0 = cx - rad;
-    let y0 = cy - rad;
-    let dark = Color::new(0.0, 0.0, 0.0, 0.97 * a);
-    // outside the lens
-    draw_rectangle(0.0, 0.0, x0.max(0.0), h, dark);
-    draw_rectangle(x0 + s, 0.0, (w - x0 - s).max(0.0), h, dark);
-    draw_rectangle(x0, 0.0, s, y0.max(0.0), dark);
-    draw_rectangle(x0, y0 + s, s, (h - y0 - s).max(0.0), dark);
-    // corners of the square beyond the circle
-    let t = s * 0.24;
-    draw_poly_lines(cx, cy, 120, rad + t * 0.5 - 1.0, 0.0, t, dark);
-    // soft vignette inside the lens
-    for i in 0..6 {
-        let k = i as f32;
-        draw_poly_lines(cx, cy, 120, rad - (k + 0.5) * s * 0.012, 0.0, s * 0.012, Color::new(0.0, 0.0, 0.0, (0.30 - k * 0.05) * a));
+    let red = Color::new(0.95, 0.18, 0.12, 0.9);
+    let shadow = Color::new(0.02, 0.02, 0.02, 0.75);
+    let gap = 6.0 * u;
+    let len = 12.0 * u;
+    for (c, thick) in [(shadow, 3.0 * u), (red, 1.4 * u)] {
+        draw_line(cx - gap - len, cy, cx - gap, cy, thick, c);
+        draw_line(cx + gap, cy, cx + gap + len, cy, thick, c);
+        draw_line(cx, cy - gap - len, cx, cy - gap, thick, c);
+        draw_line(cx, cy + gap, cx, cy + gap + len, thick, c);
     }
-    draw_circle(cx, cy, rad, Color::new(0.45, 0.75, 0.85, 0.035 * a));
-    draw_poly_lines(cx, cy, 120, rad, 0.0, 4.0 * u, Color::new(0.10, 0.11, 0.12, a));
-    draw_poly_lines(cx, cy, 120, rad - 5.0 * u, 0.0, 1.5 * u, Color::new(0.45, 0.5, 0.52, 0.6 * a));
-
-    // reticle: fine centre cross, heavy outer posts, mil dots
-    let line = Color::new(0.02, 0.02, 0.02, 0.92 * a);
-    let thin = 1.3 * u;
-    let post = 5.0 * u;
-    let inner = rad * 0.07;
-    let mid = rad * 0.30;
-    for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-        draw_line(cx + dx * inner, cy + dy * inner, cx + dx * mid, cy + dy * mid, thin, line);
-        draw_line(cx + dx * mid, cy + dy * mid, cx + dx * rad * 0.97, cy + dy * rad * 0.97, post, line);
-    }
-    for i in 1..=4 {
-        let o = inner + (mid - inner) * i as f32 / 4.0;
-        for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-            draw_circle(cx + dx * o, cy + dy * o, 2.2 * u, line);
-        }
-    }
-    draw_circle(cx, cy, 1.8 * u, Color::new(0.95, 0.12, 0.10, a));
-
-    let tc = Color::new(0.85, 0.95, 0.9, 0.95 * a);
-    draw_center(&format!("{:.1}x", g.mag), cx, cy + rad * 0.80, 22.0 * u, tc);
-    let rng = if g.range > 0.0 { format!("RNG {:.0} m", g.range) } else { "RNG ---".to_string() };
-    draw_center(&rng, cx, cy + rad * 0.88, 18.0 * u, tc);
+    draw_circle(cx, cy, 1.5 * u, red);
+    draw_text(&format!("{:.1}x", g.mag), cx + 18.0 * u, cy + 30.0 * u, 17.0 * u, WHITE);
+    let range = if g.range > 0.0 { format!("{:.0}m", g.range) } else { "--m".to_string() };
+    draw_text(&range, cx + 18.0 * u, cy + 49.0 * u, 15.0 * u, WHITE);
 }
 
-pub fn draw_minimap(g: &Game, x: f32, y: f32, size: f32) {
-    draw_rectangle(x, y, size, size, Color::new(0.05, 0.07, 0.10, 0.65));
+pub fn draw_minimap(g: &Game, w: &World, x: f32, y: f32, size: f32) {
+    draw_rectangle(x, y, size, size, Color::new(0.13, 0.16, 0.17, 0.9));
     draw_rectangle_lines(x, y, size, size, 2.0, Color::new(0.8, 0.92, 1.0, 0.7));
     let k = size / SIZE;
-    for bi in 0..NB {
-        for bj in 0..NB {
-            let bx = bj as f32 * PERIOD + ROAD;
-            let bz = bi as f32 * PERIOD + ROAD;
-            draw_rectangle(x + bx * k, y + bz * k, 24.0 * k, 24.0 * k, Color::new(0.35, 0.40, 0.45, 0.85));
-        }
+    for v in [SIZE*0.30,SIZE*0.50,SIZE*0.70] {
+        draw_line(x+v*k,y+2.0,x+v*k,y+size-2.0,1.0,Color::new(0.8,0.82,0.76,0.16));
+        draw_line(x+2.0,y+v*k,x+size-2.0,y+v*k,1.0,Color::new(0.8,0.82,0.76,0.16));
+    }
+    for bx in &w.boxes {
+        draw_rectangle(x+bx.x0*k,y+bx.z0*k,(bx.x1-bx.x0)*k,(bx.z1-bx.z0)*k,Color::new(0.60,0.30,0.10,0.95));
     }
     for t in &g.targets {
         if t.alive {
-            draw_circle(x + t.x * k, y + t.z * k, 2.0, Color::new(1.0, 0.3, 0.25, 1.0));
+            let c=if t.team==Team::Red {Color::new(1.0,0.25,0.18,1.0)} else {Color::new(0.16,0.55,1.0,1.0)};
+            draw_circle(x + t.x * k, y + t.z * k, 2.3, c);
         }
     }
     let px = x + g.x * k;
