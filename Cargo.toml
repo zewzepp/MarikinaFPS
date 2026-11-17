@@ -2,7 +2,7 @@
 name = "marikinafps"
 version = "0.1.0"
 edition = "2021"
-description = "A tiny touch-friendly raycast FPS prototype in Rust"
+description = "A touch-friendly third-person city shooter in Rust (macroquad)"
 license = "MIT"
 
 [dependencies]
@@ -22,5 +22,5 @@ fullscreen = true
 
 [profile.release]
 lto = false
-opt-level = 2
+opt-level = 3
 strip = false
